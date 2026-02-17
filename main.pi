@@ -1,0 +1,9 @@
+
+le test: "string value"
+el value: test
+el name_mut: value
+le name_immutable: 22
+le v2: "str "
+
+printa 33
+printa name_mut

@@ -1,0 +1,10 @@
+[package]
+name = "small_jit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+logos = "0.16.1"
+rayon = "1.11.0"
+rustc-hash = "2.1.1"
+thiserror = "2.0.18"
