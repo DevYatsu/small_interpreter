@@ -8,8 +8,8 @@ use crate::{
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -105,6 +105,11 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
     let registers: Arc<[AtomicU64]> = Arc::from(regs);
 
     let mut join_set = JoinSet::new();
+    let task_roots = Arc::new(Mutex::new(Vec::with_capacity(32)));
+    {
+        let mut active = ctx.active_registers.lock().unwrap();
+        active.push(task_roots.clone());
+    }
 
     execute_bytecode(
         program.instructions.clone(),
@@ -112,6 +117,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
         &mut join_set,
         registers,
         None,
+        task_roots,
     )
     .await?;
 
@@ -130,29 +136,26 @@ pub async fn execute_bytecode(
     join_set: &mut JoinSet<Result<(), JitError>>,
     registers: Arc<[AtomicU64]>,
     dst_reg: Option<&AtomicU64>,
+    task_roots: Arc<Mutex<Vec<Arc<[AtomicU64]>>>>,
 ) -> Result<Value, JitError> {
     // Register for GC
     {
-        let mut active = ctx.active_registers.lock().unwrap();
+        let mut active = task_roots.lock().unwrap();
         active.push(registers.clone());
     }
 
     // De-register on drop
     struct RegGuard {
-        ctx: Arc<Context>,
-        regs: Arc<[AtomicU64]>,
+        task_roots: Arc<Mutex<Vec<Arc<[AtomicU64]>>>>,
     }
     impl Drop for RegGuard {
         fn drop(&mut self) {
-            let mut active = self.ctx.active_registers.lock().unwrap();
-            if let Some(pos) = active.iter().position(|r| Arc::ptr_eq(r, &self.regs)) {
-                active.swap_remove(pos);
-            }
+            let mut active = self.task_roots.lock().unwrap();
+            active.pop();
         }
     }
     let _guard = RegGuard {
-        ctx: ctx.clone(),
-        regs: registers.clone(),
+        task_roots: task_roots.clone(),
     };
 
     let mut pc = 0;
@@ -311,6 +314,7 @@ pub async fn execute_bytecode(
                                 join_set,
                                 f_regs,
                                 dst.map(|r| unsafe { registers.get_unchecked(r) }),
+                                task_roots.clone(),
                             )
                             .await?;
                         }
@@ -382,6 +386,7 @@ pub async fn execute_bytecode(
                                 join_set,
                                 f_regs,
                                 dst.map(|r| unsafe { registers.get_unchecked(r) }),
+                                task_roots.clone(),
                             )
                             .await?;
                         }
@@ -895,18 +900,24 @@ pub async fn execute_bytecode(
 
                 join_set.spawn(async move {
                     let mut js = JoinSet::new();
-                    let _ = execute_bytecode(body, s_ctx, &mut js, thread_regs, None).await?;
+                    let t_roots = Arc::new(Mutex::new(Vec::with_capacity(16)));
+                    {
+                        let mut active = s_ctx.active_registers.lock().unwrap();
+                        active.push(t_roots.clone());
+                    }
+                    let res =
+                        execute_bytecode(body, s_ctx, &mut js, thread_regs, None, t_roots).await;
                     while let Some(res) = js.join_next().await {
                         if let Ok(Err(e)) = res {
                             return Err(e);
                         }
                     }
-                    Ok(())
+                    res.map(|_| ())
                 });
                 pc += 1;
             }
         }
-        if instr_count & 0x3FF == 0 {
+        if instr_count & 0x3FFF == 0 {
             tokio::task::yield_now().await;
         }
     }
@@ -1136,7 +1147,12 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                                     }
 
                                     let mut js = JoinSet::new();
-                                    match execute_bytecode(instructions, ctx.clone(), &mut js, registers, None).await {
+                                    let t_roots = Arc::new(Mutex::new(Vec::with_capacity(16)));
+                                    {
+                                        let mut active = ctx.active_registers.lock().unwrap();
+                                        active.push(t_roots.clone());
+                                    }
+                                    match execute_bytecode(instructions, ctx.clone(), &mut js, registers, None, t_roots).await {
                                         Ok(res) => {
                                             let resp_body = res.as_string(&ctx).unwrap_or_else(|| "OK".into());
                                             let full_resp = if resp_body.starts_with("HTTP/") {

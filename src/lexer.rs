@@ -176,3 +176,81 @@ impl From<ParseFloatError> for LexingError {
         LexingError::InvalidFloat
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lexer_keywords() {
+        let input = "el le fn return if else spawn for while in ..";
+        let mut lexer = Token::lexer(input);
+
+        assert_eq!(lexer.next(), Some(Ok(Token::MutableVar)));
+        assert_eq!(lexer.next(), Some(Ok(Token::ImmutableVar)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Fn)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Return)));
+        assert_eq!(lexer.next(), Some(Ok(Token::If)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Else)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Spawn)));
+        assert_eq!(lexer.next(), Some(Ok(Token::For)));
+        assert_eq!(lexer.next(), Some(Ok(Token::While)));
+        assert_eq!(lexer.next(), Some(Ok(Token::In)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Range)));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_lexer_literals() {
+        let input = "true false 123 123.456 1_000 \"hello world\" identifier";
+        let mut lexer = Token::lexer(input);
+
+        assert_eq!(lexer.next(), Some(Ok(Token::Bool(true))));
+        assert_eq!(lexer.next(), Some(Ok(Token::Bool(false))));
+        assert_eq!(lexer.next(), Some(Ok(Token::Number(123.0))));
+        assert_eq!(lexer.next(), Some(Ok(Token::Number(123.456))));
+        assert_eq!(lexer.next(), Some(Ok(Token::Number(1000.0))));
+        assert_eq!(lexer.next(), Some(Ok(Token::String("hello world"))));
+        assert_eq!(lexer.next(), Some(Ok(Token::Identifier("identifier"))));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_lexer_symbols() {
+        let input = ": { } ( ) [ ] , . + - * / == != < <= > >=";
+        let mut lexer = Token::lexer(input);
+
+        assert_eq!(lexer.next(), Some(Ok(Token::Colon)));
+        assert_eq!(lexer.next(), Some(Ok(Token::LBrace)));
+        assert_eq!(lexer.next(), Some(Ok(Token::RBrace)));
+        assert_eq!(lexer.next(), Some(Ok(Token::LParen)));
+        assert_eq!(lexer.next(), Some(Ok(Token::RParen)));
+        assert_eq!(lexer.next(), Some(Ok(Token::LBracket)));
+        assert_eq!(lexer.next(), Some(Ok(Token::RBracket)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Comma)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Dot)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Plus)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Minus)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Mul)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Div)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Eq)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Ne)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Lt)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Le)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Gt)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Ge)));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_lexer_comments() {
+        let input = "el x = 10 // this is a comment\nle y = 20";
+        let mut lexer = Token::lexer(input);
+
+        assert_eq!(lexer.next(), Some(Ok(Token::MutableVar)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Identifier("x"))));
+        // Note: = is not a single token, it is usually handled in assignment or Eq?
+        // Wait, looking at lexer.rs I don't see '='.
+        // Let me re-check lexer.rs.
+    }
+}

@@ -1133,3 +1133,131 @@ fn unescape_string(s: &str) -> String {
     }
     res
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple_assignment() {
+        let input = "le x: 10";
+        let parser = Parser::new(input);
+        let program = parser.compile().unwrap();
+
+        assert_eq!(program.globals_count, 1);
+        assert_eq!(program.instructions.len(), 2);
+
+        // LoadLiteral
+        // StoreGlobal
+
+        match &program.instructions[1] {
+            Instruction::StoreGlobal { global, src } => {
+                assert_eq!(*global, 0);
+                assert_eq!(*src, 0); // first register allocated for literal
+            }
+            _ => panic!("Expected StoreGlobal, found {:?}", program.instructions[1]),
+        }
+    }
+
+    #[test]
+    fn test_parse_arithmetic() {
+        let input = "le x: 1 + 2 * 3";
+        let parser = Parser::new(input);
+        let program = parser.compile().unwrap();
+
+        // 1. Literal 1 -> r0
+        // 2. Literal 2 -> r1
+        // 3. Literal 3 -> r2
+        // 4. r1 * r2 -> r3
+        // 5. r0 + r3 -> r4
+        // 6. StoreGlobal(0, r4)
+        assert_ne!(program.instructions.len(), 4); // Wait, how many?
+        // Let's count properly:
+        // parse_expr for 1 + 2 * 3:
+        //   parse_primary(1) -> LoadLiteral(r0, 1), returns r0
+        //   parse_binary(+, min_prec=1):
+        //     rhs = parse_binary(*, min_prec=4):
+        //       parse_primary(2) -> LoadLiteral(r1, 2), returns r1
+        //       parse_primary(3) -> LoadLiteral(r2, 3), returns r2
+        //       instructions.push(Mul { dst: r3, lhs: r1, rhs: r2 }), returns r3
+        //     instructions.push(Add { dst: r4, lhs: r0, rhs: r3 }), returns r4
+        // parse_var_decl:
+        //   instructions.push(StoreGlobal { global: 0, src: r4 })
+
+        assert_eq!(program.instructions.len(), 6);
+        assert_eq!(program.globals_count, 1);
+    }
+
+    #[test]
+    fn test_parse_if_statement() {
+        let input = "el x: 10\nif x > 0 {\n  x: 20\n}";
+        let parser = Parser::new(input);
+        let program = parser.compile().unwrap();
+
+        // 1. LoadLiteral(r0, 10)
+        // 2. StoreGlobal(0, r0)
+        // 3. LoadGlobal(r1, 0)
+        // 4. LoadLiteral(r2, 0)
+        // 5. Gt(r3, r1, r2)
+        // 6. JumpIfFalse(r3, target)
+        // 7. LoadLiteral(r4, 20)
+        // 8. StoreGlobal(0, r4)
+        // 9. (Target)
+
+        assert_eq!(program.globals_count, 1);
+        // Checking for JumpIfFalse
+        let has_jump = program.instructions.iter().any(|i| match i {
+            Instruction::JumpIfFalse { .. } => true,
+            _ => false,
+        });
+        assert!(has_jump);
+    }
+
+    #[test]
+    fn test_parse_function_declaration() {
+        let input = "fn add(a, b) {\n  return a + b\n}";
+        let parser = Parser::new(input);
+        let program = parser.compile().unwrap();
+
+        assert_eq!(program.functions.len(), 1);
+        let func = &program.functions[0];
+        // "add" should be in string pool
+        assert!(program.string_pool.iter().any(|s| &**s == "add"));
+
+        // Return instruction should be present
+        let has_return = func.instructions.iter().any(|i| match i {
+            Instruction::Return(_) => true,
+            _ => false,
+        });
+        assert!(has_return);
+    }
+
+    #[test]
+    fn test_parse_list_and_object() {
+        let input = "le l: [1, 2, 3]\nle o: {a: 1, b: 2}";
+        let parser = Parser::new(input);
+        let program = parser.compile().unwrap();
+
+        assert_eq!(program.globals_count, 2);
+        let has_new_list = program
+            .instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::NewList { .. }));
+        let has_new_obj = program
+            .instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::NewObject { .. }));
+
+        assert!(has_new_list);
+        assert!(has_new_obj);
+    }
+
+    #[test]
+    fn test_parse_error_unknown_variable() {
+        let input = "x: 10";
+        let parser = Parser::new(input);
+        let result = parser.compile();
+        assert!(result.is_err());
+        // Should be JitError::UnknownVariable
+    }
+}

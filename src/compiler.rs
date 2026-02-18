@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::backends::{Context, ManagedObject};
 
 /// Represents a location in the source code.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Loc {
     pub line: u32,
     pub col: u32,
@@ -131,7 +131,7 @@ impl Value {
 }
 
 /// The instruction set for the interpreter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// Load a constant Value into a destination register.
     LoadLiteral { dst: usize, val: Value },
@@ -270,7 +270,7 @@ pub enum Instruction {
 }
 
 /// A compiled user-defined function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserFunction {
     /// ID of the function name in the string pool.
     #[allow(dead_code)]
@@ -285,7 +285,7 @@ pub struct UserFunction {
 }
 
 /// The complete compiled program ready for execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     /// Entry point bytecode.
     pub instructions: Arc<[Instruction]>,

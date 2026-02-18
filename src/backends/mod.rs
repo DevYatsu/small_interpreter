@@ -39,7 +39,7 @@ pub struct Context {
     pub globals: Arc<[AtomicU64]>,
     pub string_pool: Arc<[Arc<str>]>,
     pub callables: Arc<[Option<Callable>]>,
-    pub active_registers: Mutex<Vec<Arc<[AtomicU64]>>>,
+    pub active_registers: Mutex<Vec<Arc<Mutex<Vec<Arc<[AtomicU64]>>>>>>,
     pub heap: Heap,
 }
 
@@ -158,12 +158,15 @@ impl Heap {
                 worklist.push(id);
             }
         }
-        let active_regs = ctx.active_registers.lock().unwrap();
-        for regs in active_regs.iter() {
-            for atomic_val in regs.iter() {
-                let val = Value::from_bits(atomic_val.load(Ordering::Relaxed));
-                if let Some(id) = val.as_obj_id() {
-                    worklist.push(id);
+        let active_tasks = ctx.active_registers.lock().unwrap();
+        for task_roots in active_tasks.iter() {
+            let regs_stack = task_roots.lock().unwrap();
+            for regs in regs_stack.iter() {
+                for atomic_val in regs.iter() {
+                    let val = Value::from_bits(atomic_val.load(Ordering::Relaxed));
+                    if let Some(id) = val.as_obj_id() {
+                        worklist.push(id);
+                    }
                 }
             }
         }
@@ -268,7 +271,7 @@ impl Context {
 
     pub fn alloc(&self, obj: ManagedObject, dst: &AtomicU64) -> u32 {
         let count = self.heap.alloc_since_gc.fetch_add(1, Ordering::Relaxed);
-        if count >= 10000
+        if count >= 100000
             && self
                 .heap
                 .alloc_since_gc
