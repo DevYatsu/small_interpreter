@@ -52,7 +52,7 @@ async fn main() -> Result<(), JitError> {
     }
 
     let total = start.elapsed();
-    if cfg!(debug_assertions) {
+    if true {
         println!("\nExecution completed in {:?}", total);
     }
 

@@ -1,90 +1,66 @@
 use crate::{
-    compiler::{Instruction, Loc, Program, Value},
+    compiler::{Instruction, Loc, Program, UserFunction, Value},
     error::JitError,
     lexer::Token,
 };
-use logos::{Lexer, Logos};
-use rustc_hash::FxHashMap;
+use logos::{Lexer, Logos, Span};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
-/// Metadata about a variable in the current scope.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct VarInfo {
-    /// The register index assigned to this variable.
     idx: usize,
-    /// Whether the variable is mutable ('el') or immutable ('le').
     is_mut: bool,
-    /// Whether this variable is a global.
     is_global: bool,
-    /// The line number where the variable was first defined.
     first_line: usize,
 }
 
-#[derive(Clone, Copy)]
 enum Accessor {
     Index(usize),
     Field(u32),
 }
 
 /// The Parser transforms source code into a compiled Program (bytecode).
-///
-/// It performs lexical analysis (via Lexer), handles variable scoping,
-/// manages string interning, and emits bytecode instructions.
 pub struct Parser<'source> {
-    /// The Logos lexer for tokenizing the input.
     lexer: Lexer<'source, Token<'source>>,
-    /// Current line number in the source.
+    /// Lookahead buffer for up to 3 tokens.
+    peeked: [Option<(Token<'source>, Span)>; 3],
+
     line: usize,
-    /// Character offset of the start of the current line.
     line_start: usize,
-    /// Mapping from variable names to their metadata.
-    var_map: FxHashMap<&'source str, VarInfo>,
-    /// Global string pool for interning.
+
+    /// Global variables.
+    globals: FxHashMap<&'source str, VarInfo>,
+    /// Local variables in the current function/scope.
+    locals: FxHashMap<&'source str, VarInfo>,
+
+    /// Interned strings.
     strings: Vec<Arc<str>>,
-    /// Mapping for deduplicating strings in the pool.
-    string_map: FxHashMap<String, u32>,
-    /// Counter for the next available register index in the current function/main block.
+    /// Map for fast interning lookups.
+    string_map: FxHashMap<Arc<str>, u32>,
+
+    functions: Vec<UserFunction>,
+
     next_reg: usize,
-    /// Counter for the next available global index.
     next_global: usize,
-    /// Whether currently parsing inside a 'spawn' block.
+
     is_in_spawn: bool,
-    /// Whether currently parsing inside a function body.
     is_in_function: bool,
-    /// Stack of registers captured by nested 'spawn' blocks.
-    captures_stack: Vec<std::collections::HashSet<usize>>,
-    /// Starting register index for each active 'spawn' block.
+    captures_stack: Vec<FxHashSet<usize>>,
     spawn_start_regs: Vec<usize>,
-    /// All compiled functions in the program.
-    functions: Vec<crate::compiler::UserFunction>,
-    /// Mapping from function names to their ID.
-    function_map: FxHashMap<String, u32>,
-    /// All function names (scanned in advance) to support passing them as arguments.
-    all_function_names: std::collections::HashSet<&'source str>,
 }
 
 impl<'source> Parser<'source> {
     pub fn new(input: &'source str) -> Self {
-        let lexer = Token::lexer(input);
-        let mut all_function_names = std::collections::HashSet::new();
-        let mut temp_lex = lexer.clone();
-        while let Some(res) = temp_lex.next() {
-            if let Ok(Token::Fn) = res
-                && let Some(Ok(Token::Identifier(id))) = temp_lex.next()
-            {
-                all_function_names.insert(id);
-            }
-        }
-        for name in ["print", "len", "time", "sleep", "fetch", "serve", "str"] {
-            all_function_names.insert(name);
-        }
-
-        Self {
+        let mut lexer = Token::lexer(input);
+        let mut p = Self {
+            peeked: [None, None, None],
             lexer,
             line: 1,
             line_start: 0,
-            var_map: FxHashMap::default(),
-            strings: Vec::new(),
+            globals: FxHashMap::default(),
+            locals: FxHashMap::default(),
+            strings: Vec::with_capacity(64),
             string_map: FxHashMap::default(),
             next_reg: 0,
             next_global: 0,
@@ -92,16 +68,73 @@ impl<'source> Parser<'source> {
             is_in_function: false,
             captures_stack: Vec::new(),
             spawn_start_regs: Vec::new(),
-            functions: Vec::new(),
-            function_map: FxHashMap::default(),
-            all_function_names,
+            functions: Vec::with_capacity(16),
+        };
+        // Fill initial lookahead
+        p.advance().ok();
+        p.advance().ok();
+        p.advance().ok();
+        p
+    }
+
+    /// Advance the lexer and return the previous token and its span.
+    fn advance(&mut self) -> Result<(Token<'source>, Span), JitError> {
+        let res = self.peeked[0].take();
+        self.peeked[0] = self.peeked[1].take();
+        self.peeked[1] = self.peeked[2].take();
+        self.peeked[2] = match self.lexer.next() {
+            Some(Ok(t)) => Some((t, self.lexer.span())),
+            Some(Err(e)) => return Err(JitError::Lexing(e, self.line, self.loc().col as usize)),
+            None => None,
+        };
+
+        match res {
+            Some((t, s)) => {
+                if let Token::Newline = t {
+                    self.line += 1;
+                    self.line_start = s.end;
+                }
+                Ok((t, s))
+            }
+            None => Err(JitError::Parsing(
+                "Unexpected EOF".into(),
+                self.line,
+                self.loc().col as usize,
+            )),
+        }
+    }
+
+    #[inline(always)]
+    fn peek(&self) -> Option<Token<'source>> {
+        self.peeked[0].as_ref().map(|(t, _)| *t)
+    }
+
+    #[inline(always)]
+    fn peek_n(&self, n: usize) -> Option<Token<'source>> {
+        self.peeked[n].as_ref().map(|(t, _)| *t)
+    }
+
+    #[inline(always)]
+    fn loc(&self) -> Loc {
+        let span = self.peeked[0]
+            .as_ref()
+            .map(|(_, s)| s.clone())
+            .unwrap_or_else(|| self.lexer.span());
+        let col = span.start.saturating_sub(self.line_start) + 1;
+        Loc {
+            line: self.line as u32,
+            col: col as u32,
         }
     }
 
     pub fn compile(mut self) -> Result<Program, JitError> {
         let mut instructions = Vec::new();
-        while let Some(res) = self.parse_statement(&mut instructions) {
-            res?;
+        while self.peek().is_some() {
+            if let Some(res) = self.parse_statement(&mut instructions) {
+                res?;
+            } else {
+                break;
+            }
         }
         Ok(Program {
             instructions: Arc::from(instructions),
@@ -118,17 +151,9 @@ impl<'source> Parser<'source> {
         } else {
             let id = self.strings.len() as u32;
             let arc_s: Arc<str> = Arc::from(s);
-            self.strings.push(arc_s);
-            self.string_map.insert(s.to_string(), id);
+            self.strings.push(arc_s.clone());
+            self.string_map.insert(arc_s, id);
             id
-        }
-    }
-
-    fn loc(&self) -> Loc {
-        let col = self.lexer.span().start.saturating_sub(self.line_start) + 1;
-        Loc {
-            line: self.line as u32,
-            col: col as u32,
         }
     }
 
@@ -138,38 +163,23 @@ impl<'source> Parser<'source> {
         r
     }
 
-    fn peek(&mut self) -> Option<Result<Token<'source>, crate::lexer::LexingError>> {
-        self.lexer.clone().next()
-    }
-
-    fn next_token(&mut self) -> Option<Result<Token<'source>, crate::lexer::LexingError>> {
-        let tok = self.lexer.next();
-        if let Some(Ok(Token::Newline)) = tok {
-            self.line += 1;
-            self.line_start = self.lexer.span().end;
-        }
-        tok
-    }
-
     fn skip_newlines(&mut self) {
-        while matches!(
-            self.peek(),
-            Some(Ok(Token::Newline)) | Some(Ok(Token::LineComment))
-        ) {
-            self.next_token();
+        while matches!(self.peek(), Some(Token::Newline) | Some(Token::LineComment)) {
+            self.advance().ok();
         }
     }
 
-    fn expect(&mut self) -> Result<Token<'source>, JitError> {
-        let loc = self.loc();
-        match self.next_token() {
-            Some(Ok(t)) => Ok(t),
-            Some(Err(e)) => Err(JitError::Lexing(e, loc.line as usize, loc.col as usize)),
-            None => Err(JitError::Parsing(
-                "Unexpected EOF".into(),
-                loc.line as usize,
-                loc.col as usize,
-            )),
+    fn expect(&mut self, expected: Token) -> Result<(), JitError> {
+        let (t, s) = self.advance()?;
+        if t == expected {
+            Ok(())
+        } else {
+            let col = s.start.saturating_sub(self.line_start) + 1;
+            Err(JitError::Parsing(
+                format!("Expected {:?}", expected),
+                self.line,
+                col,
+            ))
         }
     }
 
@@ -185,7 +195,7 @@ impl<'source> Parser<'source> {
         let mut lhs = self.parse_primary(instructions)?;
         loop {
             let op = match self.peek() {
-                Some(Ok(t)) => t,
+                Some(t) => t,
                 _ => break,
             };
             let prec = match op {
@@ -198,7 +208,7 @@ impl<'source> Parser<'source> {
             if prec < min_prec {
                 break;
             }
-            self.next_token();
+            self.advance()?;
             let loc = self.loc();
             let rhs = self.parse_binary(prec + 1, instructions)?;
             let dst = self.alloc_reg();
@@ -223,17 +233,11 @@ impl<'source> Parser<'source> {
 
     fn parse_primary(&mut self, instructions: &mut Vec<Instruction>) -> Result<usize, JitError> {
         let loc = self.loc();
-        let token = self.expect()?;
+        let (token, _span) = self.advance()?;
         let mut current_reg = match token {
             Token::LParen => {
                 let r = self.parse_expr(instructions)?;
-                if !matches!(self.expect()?, Token::RParen) {
-                    return Err(JitError::Parsing(
-                        "Expected ')'".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
+                self.expect(Token::RParen)?;
                 Ok(r)
             }
             Token::Number(n) => {
@@ -254,12 +258,8 @@ impl<'source> Parser<'source> {
             }
             Token::String(s) => {
                 let unescaped = unescape_string(s);
-                let val = if let Some(sso) = Value::sso(&unescaped) {
-                    sso
-                } else {
-                    let id = self.intern(&unescaped);
-                    Value::object(id)
-                };
+                let val = Value::sso(&unescaped)
+                    .unwrap_or_else(|| Value::object(self.intern(&unescaped)));
                 let r = self.alloc_reg();
                 instructions.push(Instruction::LoadLiteral { dst: r, val });
                 Ok(r)
@@ -267,53 +267,13 @@ impl<'source> Parser<'source> {
             Token::LBracket => self.parse_list_literal(instructions),
             Token::LBrace => self.parse_object_literal(instructions),
             Token::Identifier(id) => {
-                // Check if it's a function call
-                if matches!(self.peek(), Some(Ok(Token::LParen))) {
-                    self.next_token(); // consume (
-                    self.skip_newlines();
-                    let mut args = Vec::new();
-                    if !matches!(self.peek(), Some(Ok(Token::RParen))) {
-                        loop {
-                            self.skip_newlines();
-                            args.push(self.parse_expr(instructions)?);
-                            self.skip_newlines();
-                            match self.expect()? {
-                                Token::Comma => {
-                                    self.skip_newlines();
-                                    if matches!(self.peek(), Some(Ok(Token::RParen))) {
-                                        let _ = self.next_token(); // consume )
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                Token::RParen => break,
-                                _ => {
-                                    return Err(JitError::Parsing(
-                                        "Expected ',' or ')'".into(),
-                                        self.line,
-                                        0,
-                                    ));
-                                }
-                            }
-                        }
-                    } else {
-                        self.next_token(); // consume )
-                    }
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    self.advance()?; // consume (
+                    let args = self.parse_call_args(instructions)?;
                     let dst = self.alloc_reg();
 
-                    // Dynamic dispatch: callee is stored in a variable
-                    if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(id) {
-                        let callee_reg = if is_global {
-                            let r = self.alloc_reg();
-                            instructions.push(Instruction::LoadGlobal {
-                                dst: r,
-                                global: idx,
-                            });
-                            r
-                        } else {
-                            self.track_capture(idx);
-                            idx
-                        };
+                    if let Some(info) = self.get_var(id) {
+                        let callee_reg = self.load_var(info, instructions);
                         instructions.push(Instruction::CallDynamic {
                             callee_reg,
                             args_regs: Arc::from(args),
@@ -321,7 +281,6 @@ impl<'source> Parser<'source> {
                             loc: self.loc(),
                         });
                     } else {
-                        // Unified Call: user or native resolved at runtime by name ID
                         let name_id = self.intern(id);
                         instructions.push(Instruction::Call {
                             name_id,
@@ -331,34 +290,14 @@ impl<'source> Parser<'source> {
                         });
                     }
                     Ok(dst)
-                } else if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(id) {
-                    if is_global {
-                        let r = self.alloc_reg();
-                        instructions.push(Instruction::LoadGlobal {
-                            dst: r,
-                            global: idx,
-                        });
-                        Ok(r)
-                    } else {
-                        self.track_capture(idx);
-                        Ok(idx)
-                    }
-                } else if self.all_function_names.contains(id) {
-                    let val = if let Some(sso) = Value::sso(id) {
-                        sso
-                    } else {
-                        let id_intern = self.intern(id);
-                        Value::object(id_intern)
-                    };
+                } else if let Some(info) = self.get_var(id) {
+                    Ok(self.load_var(info, instructions))
+                } else {
+                    // Potential function literal
+                    let val = Value::sso(id).unwrap_or_else(|| Value::object(self.intern(id)));
                     let r = self.alloc_reg();
                     instructions.push(Instruction::LoadLiteral { dst: r, val });
                     Ok(r)
-                } else {
-                    Err(JitError::UnknownVariable(
-                        id.into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ))
                 }
             }
             _ => Err(JitError::Parsing(
@@ -372,14 +311,10 @@ impl<'source> Parser<'source> {
         loop {
             self.skip_newlines();
             match self.peek() {
-                Some(Ok(Token::LBracket)) => {
-                    self.next_token();
-                    self.skip_newlines();
+                Some(Token::LBracket) => {
+                    self.advance()?;
                     let index_reg = self.parse_expr(instructions)?;
-                    self.skip_newlines();
-                    if !matches!(self.next_token(), Some(Ok(Token::RBracket))) {
-                        return Err(JitError::Parsing("Expected ']'".into(), self.line, 0));
-                    }
+                    self.expect(Token::RBracket)?;
                     let dst = self.alloc_reg();
                     instructions.push(Instruction::ListGet {
                         dst,
@@ -389,11 +324,10 @@ impl<'source> Parser<'source> {
                     });
                     current_reg = dst;
                 }
-                Some(Ok(Token::Dot)) => {
-                    self.next_token();
-                    self.skip_newlines();
-                    let name = match self.next_token() {
-                        Some(Ok(Token::Identifier(id))) => id,
+                Some(Token::Dot) => {
+                    self.advance()?;
+                    let id = match self.advance()? {
+                        (Token::Identifier(id), _) => id,
                         _ => {
                             return Err(JitError::Parsing(
                                 "Expected property name after '.'".into(),
@@ -402,7 +336,7 @@ impl<'source> Parser<'source> {
                             ));
                         }
                     };
-                    let name_id = self.intern(name);
+                    let name_id = self.intern(id);
                     let dst = self.alloc_reg();
                     instructions.push(Instruction::ObjectGet {
                         dst,
@@ -418,44 +352,60 @@ impl<'source> Parser<'source> {
         Ok(current_reg)
     }
 
+    fn parse_call_args(
+        &mut self,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Vec<usize>, JitError> {
+        let mut args = Vec::new();
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(Token::RParen)) {
+            loop {
+                self.skip_newlines();
+                args.push(self.parse_expr(instructions)?);
+                self.skip_newlines();
+                match self.peek() {
+                    Some(Token::Comma) => {
+                        self.advance()?;
+                        if matches!(self.peek(), Some(Token::RParen)) {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok(args)
+    }
+
     fn parse_list_literal(
         &mut self,
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
         let mut elements = Vec::new();
         self.skip_newlines();
-        if !matches!(self.peek(), Some(Ok(Token::RBracket))) {
+        if !matches!(self.peek(), Some(Token::RBracket)) {
             loop {
                 self.skip_newlines();
                 elements.push(self.parse_expr(instructions)?);
                 self.skip_newlines();
-                match self.next_token() {
-                    Some(Ok(Token::Comma)) => {
-                        self.skip_newlines();
-                        if matches!(self.peek(), Some(Ok(Token::RBracket))) {
-                            break;
-                        }
+                if matches!(self.peek(), Some(Token::Comma)) {
+                    self.advance()?;
+                    if matches!(self.peek(), Some(Token::RBracket)) {
+                        break;
                     }
-                    Some(Ok(Token::RBracket)) => break,
-                    _ => {
-                        return Err(JitError::Parsing(
-                            "Expected ',' or ']'".into(),
-                            self.line,
-                            0,
-                        ));
-                    }
+                } else {
+                    break;
                 }
             }
-        } else {
-            self.next_token();
         }
+        self.expect(Token::RBracket)?;
 
         let dst = self.alloc_reg();
         instructions.push(Instruction::NewList {
             dst,
             len: elements.len(),
         });
-
         for (i, &src) in elements.iter().enumerate() {
             let index_reg = self.alloc_reg();
             instructions.push(Instruction::LoadLiteral {
@@ -469,7 +419,6 @@ impl<'source> Parser<'source> {
                 loc: self.loc(),
             });
         }
-
         Ok(dst)
     }
 
@@ -477,13 +426,13 @@ impl<'source> Parser<'source> {
         &mut self,
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
-        let mut fields = Vec::new();
+        let mut fields = Vec::with_capacity(4);
         self.skip_newlines();
-        if !matches!(self.peek(), Some(Ok(Token::RBrace))) {
+        if !matches!(self.peek(), Some(Token::RBrace)) {
             loop {
                 self.skip_newlines();
-                let name = match self.next_token() {
-                    Some(Ok(Token::Identifier(id))) => id,
+                let name = match self.advance()? {
+                    (Token::Identifier(id), _) => id,
                     _ => {
                         return Err(JitError::Parsing(
                             "Expected field name".into(),
@@ -492,50 +441,27 @@ impl<'source> Parser<'source> {
                         ));
                     }
                 };
-                self.skip_newlines();
-                if !matches!(self.next_token(), Some(Ok(Token::Colon))) {
-                    return Err(JitError::Parsing(
-                        "Expected ':' after field name".into(),
-                        self.line,
-                        0,
-                    ));
-                }
-                self.skip_newlines();
+                self.expect(Token::Colon)?;
                 let val_reg = self.parse_expr(instructions)?;
                 fields.push((name, val_reg));
-
                 self.skip_newlines();
-                match self.peek() {
-                    Some(Ok(Token::Comma)) => {
-                        self.next_token();
-                        self.skip_newlines();
-                        if matches!(self.peek(), Some(Ok(Token::RBrace))) {
-                            break;
-                        }
+                if matches!(self.peek(), Some(Token::Comma)) {
+                    self.advance()?;
+                    if matches!(self.peek(), Some(Token::RBrace)) {
+                        break;
                     }
-                    Some(Ok(Token::RBrace)) => break,
-                    _ => {
-                        return Err(JitError::Parsing(
-                            "Expected ',' or '}'".into(),
-                            self.line,
-                            0,
-                        ));
-                    }
+                } else {
+                    break;
                 }
             }
         }
-
-        self.skip_newlines();
-        if !matches!(self.next_token(), Some(Ok(Token::RBrace))) {
-            return Err(JitError::Parsing("Expected '}'".into(), self.line, 0));
-        }
+        self.expect(Token::RBrace)?;
 
         let dst = self.alloc_reg();
         instructions.push(Instruction::NewObject {
             dst,
             capacity: fields.len(),
         });
-
         for (name, src) in fields {
             let name_id = self.intern(name);
             instructions.push(Instruction::ObjectSet {
@@ -545,7 +471,6 @@ impl<'source> Parser<'source> {
                 loc: self.loc(),
             });
         }
-
         Ok(dst)
     }
 
@@ -553,128 +478,107 @@ impl<'source> Parser<'source> {
         &mut self,
         instructions: &mut Vec<Instruction>,
     ) -> Option<Result<(), JitError>> {
-        let token = self.next_token()?;
-        let loc = self.loc();
+        let token = match self.peek() {
+            Some(t) => t,
+            None => return None,
+        };
+
         match token {
-            Ok(Token::MutableVar) => Some(self.parse_var(true, instructions)),
-            Ok(Token::ImmutableVar) => Some(self.parse_var(false, instructions)),
-            Ok(Token::For) => Some(self.parse_for(instructions)),
-            Ok(Token::While) => Some(self.parse_while(instructions)),
-            Ok(Token::Fn) => Some(self.parse_fn()),
-            Ok(Token::If) => Some(self.parse_if(instructions)),
-            Ok(Token::Return) => Some(self.parse_return(instructions)),
-            Ok(Token::Spawn) => Some(self.parse_spawn(instructions)),
-            Ok(Token::Identifier(id)) => Some(self.parse_id_statement(id, instructions)),
-            Ok(Token::Newline) | Ok(Token::LineComment) => self.parse_statement(instructions),
-            Ok(Token::RBrace) => None,
+            Token::Newline | Token::LineComment => {
+                self.advance().ok();
+                self.parse_statement(instructions)
+            }
+            Token::MutableVar => Some(self.parse_var_decl(true, instructions)),
+            Token::ImmutableVar => Some(self.parse_var_decl(false, instructions)),
+            Token::For => Some(self.parse_for_loop(instructions)),
+            Token::While => {
+                self.advance().ok();
+                Some(self.parse_while_loop(instructions))
+            }
+            Token::Fn => {
+                self.advance().ok();
+                Some(self.parse_fn_decl())
+            }
+            Token::If => {
+                self.advance().ok();
+                Some(self.parse_if_stmt(instructions))
+            }
+            Token::Return => {
+                self.advance().ok();
+                Some(self.parse_return_stmt(instructions))
+            }
+            Token::Spawn => {
+                self.advance().ok();
+                Some(self.parse_spawn_stmt(instructions))
+            }
+            Token::Identifier(id) => {
+                self.advance().ok();
+                Some(self.parse_id_stmt(id, instructions))
+            }
+            Token::RBrace => None,
             _ => Some(Err(JitError::Parsing(
-                "Unexpected token".into(),
-                loc.line as usize,
-                loc.col as usize,
+                format!("Unexpected token {:?}", token),
+                self.line,
+                self.loc().col as usize,
             ))),
         }
     }
 
-    fn parse_id_statement(
+    fn parse_id_stmt(
         &mut self,
         id: &'source str,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), JitError> {
-        let next = self.peek();
-        match next {
-            Some(Ok(Token::Colon)) | Some(Ok(Token::LBracket)) => {
-                // If it's a known variable or followed by indexing/colon, treat as assignment
+        match self.peek() {
+            Some(Token::Colon) | Some(Token::LBracket) | Some(Token::Dot) => {
                 self.parse_assignment(id, instructions)
             }
-            _ => {
-                // Otherwise treat as call (command style or function style)
-                self.parse_call_statement(id, instructions)
-            }
+            _ => self.parse_call_stmt(id, instructions),
         }
     }
 
-    fn parse_call_statement(
+    fn parse_call_stmt(
         &mut self,
-        name: &'source str,
+        id: &'source str,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), JitError> {
-        let mut args = Vec::new();
-        let loc = self.loc();
-
-        if matches!(self.peek(), Some(Ok(Token::LParen))) {
-            // Function style: name(arg1, arg2)
-            self.next_token();
-            self.skip_newlines();
-            if !matches!(self.peek(), Some(Ok(Token::RParen))) {
-                loop {
-                    self.skip_newlines();
-                    args.push(self.parse_expr(instructions)?);
-                    self.skip_newlines();
-                    match self.next_token() {
-                        Some(Ok(Token::Comma)) => {
-                            self.skip_newlines();
-                            if matches!(self.peek(), Some(Ok(Token::RParen))) {
-                                break;
-                            }
-                            continue;
-                        }
-                        Some(Ok(Token::RParen)) => break,
-                        _ => {
-                            return Err(JitError::Parsing(
-                                "Expected ',' or ')'".into(),
-                                self.line,
-                                0,
-                            ));
-                        }
-                    }
-                }
-            } else {
-                self.next_token();
-            }
+        let args = if matches!(self.peek(), Some(Token::LParen)) {
+            self.advance()?;
+            self.parse_call_args(instructions)?
         } else {
-            // Command style: name arg1, arg2 (no parens)
-            loop {
-                match self.peek() {
-                    Some(Ok(Token::Newline)) | Some(Ok(Token::RBrace)) | None => break,
-                    _ => {
-                        args.push(self.parse_expr(instructions)?);
-                        if matches!(self.peek(), Some(Ok(Token::Comma))) {
-                            self.next_token();
-                        } else {
-                            break;
-                        }
-                    }
+            let mut args = Vec::new();
+            while let Some(t) = self.peek() {
+                if matches!(
+                    t,
+                    Token::Newline | Token::RBrace | Token::RParen | Token::RBracket | Token::Comma
+                ) {
+                    break;
+                }
+                args.push(self.parse_expr(instructions)?);
+                if matches!(self.peek(), Some(Token::Comma)) {
+                    self.advance()?;
+                } else {
+                    break;
                 }
             }
-        }
+            args
+        };
 
-        if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(name) {
-            // Dynamic dispatch: callee is stored in a variable
-            let callee_reg = if is_global {
-                let r = self.alloc_reg();
-                instructions.push(Instruction::LoadGlobal {
-                    dst: r,
-                    global: idx,
-                });
-                r
-            } else {
-                self.track_capture(idx);
-                idx
-            };
+        if let Some(info) = self.get_var(id) {
+            let callee_reg = self.load_var(info, instructions);
             instructions.push(Instruction::CallDynamic {
                 callee_reg,
                 args_regs: Arc::from(args),
                 dst: None,
-                loc,
+                loc: self.loc(),
             });
         } else {
-            // Unified Call: user or native resolved at runtime by name ID
-            let name_id = self.intern(name);
+            let name_id = self.intern(id);
             instructions.push(Instruction::Call {
                 name_id,
                 args_regs: Arc::from(args),
                 dst: None,
-                loc,
+                loc: self.loc(),
             });
         }
         Ok(())
@@ -682,49 +586,28 @@ impl<'source> Parser<'source> {
 
     fn parse_assignment(
         &mut self,
-        name: &'source str,
+        id: &'source str,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), JitError> {
         let loc = self.loc();
-        let info = self
-            .var_map
-            .get(name)
-            .ok_or_else(|| {
-                JitError::UnknownVariable(name.into(), loc.line as usize, loc.col as usize)
-            })?
-            .clone();
-
-        let base_reg = if info.is_global {
-            let r = self.alloc_reg();
-            instructions.push(Instruction::LoadGlobal {
-                dst: r,
-                global: info.idx,
-            });
-            r
-        } else {
-            self.track_capture(info.idx);
-            info.idx
-        };
+        let info = self.get_var(id).ok_or_else(|| {
+            JitError::UnknownVariable(id.into(), loc.line as usize, loc.col as usize)
+        })?;
 
         let mut accessors = Vec::new();
         loop {
-            self.skip_newlines();
             match self.peek() {
-                Some(Ok(Token::LBracket)) => {
-                    self.next_token();
-                    self.skip_newlines();
-                    let index_reg = self.parse_expr(instructions)?;
-                    self.skip_newlines();
-                    if !matches!(self.next_token(), Some(Ok(Token::RBracket))) {
-                        return Err(JitError::Parsing("Expected ']'".into(), self.line, 0));
-                    }
-                    accessors.push(Accessor::Index(index_reg));
+                Some(Token::LBracket) => {
+                    self.advance()?;
+                    accessors.push(Accessor::Index(self.parse_expr(instructions)?));
+                    self.expect(Token::RBracket)?;
                 }
-                Some(Ok(Token::Dot)) => {
-                    self.next_token();
-                    self.skip_newlines();
-                    let field = match self.next_token() {
-                        Some(Ok(Token::Identifier(id))) => id,
+                Some(Token::Dot) => {
+                    self.advance()?;
+                    match self.advance()? {
+                        (Token::Identifier(field), _) => {
+                            accessors.push(Accessor::Field(self.intern(field)))
+                        }
                         _ => {
                             return Err(JitError::Parsing(
                                 "Expected field name after '.'".into(),
@@ -732,56 +615,56 @@ impl<'source> Parser<'source> {
                                 0,
                             ));
                         }
-                    };
-                    let name_id = self.intern(field);
-                    accessors.push(Accessor::Field(name_id));
+                    }
                 }
                 _ => break,
             }
         }
 
-        self.skip_newlines();
-        if !matches!(self.next_token(), Some(Ok(Token::Colon))) {
-            return Err(JitError::Parsing("Expected ':'".into(), self.line, 0));
-        }
+        self.expect(Token::Colon)?;
 
-        // Optimization: detect x: x + 1 or x: 1 + x
+        // Optimization: x: x + 1
         if accessors.is_empty() {
-            let mut lex = self.lexer.clone();
-            let t1 = lex.next();
-            let t2 = lex.next();
-            let t3 = lex.next();
-            let t4 = lex.next();
-
-            let is_inc = match (&t1, &t2, &t3) {
-                (
-                    Some(Ok(Token::Identifier(id))),
-                    Some(Ok(Token::Plus)),
-                    Some(Ok(Token::Number(n))),
-                ) if *id == name && *n == 1.0 => true,
-                (
-                    Some(Ok(Token::Number(n))),
-                    Some(Ok(Token::Plus)),
-                    Some(Ok(Token::Identifier(id))),
-                ) if *id == name && *n == 1.0 => true,
-                _ => false,
-            };
-
-            if is_inc {
-                let is_isolated = match t4 {
-                    Some(Ok(Token::Newline))
-                    | Some(Ok(Token::RBrace))
-                    | Some(Ok(Token::Comma))
-                    | Some(Ok(Token::RParen))
-                    | None => true,
-                    _ => false,
-                };
-
-                if is_isolated {
-                    let _ = self.next_token(); // t1
-                    let _ = self.next_token(); // t2
-                    let _ = self.next_token(); // t3
-
+            if let Some(Token::Identifier(rhs_id)) = self.peek()
+                && rhs_id == id
+                && matches!(self.peek_n(1), Some(Token::Plus))
+                && matches!(self.peek_n(2), Some(Token::Number(1.0)))
+            {
+                let t3 = self.peek_n(3);
+                if matches!(
+                    t3,
+                    None | Some(Token::Newline)
+                        | Some(Token::RBrace)
+                        | Some(Token::Comma)
+                        | Some(Token::RParen)
+                ) {
+                    self.advance()?;
+                    self.advance()?;
+                    self.advance()?;
+                    if info.is_global {
+                        instructions.push(Instruction::IncrementGlobal(info.idx));
+                    } else {
+                        instructions.push(Instruction::Increment(info.idx));
+                    }
+                    return Ok(());
+                }
+            }
+            if let Some(Token::Number(1.0)) = self.peek()
+                && matches!(self.peek_n(1), Some(Token::Plus))
+                && let Some(Token::Identifier(rhs_id)) = self.peek_n(2)
+                && rhs_id == id
+            {
+                let t3 = self.peek_n(3);
+                if matches!(
+                    t3,
+                    None | Some(Token::Newline)
+                        | Some(Token::RBrace)
+                        | Some(Token::Comma)
+                        | Some(Token::RParen)
+                ) {
+                    self.advance()?;
+                    self.advance()?;
+                    self.advance()?;
                     if info.is_global {
                         instructions.push(Instruction::IncrementGlobal(info.idx));
                     } else {
@@ -792,98 +675,80 @@ impl<'source> Parser<'source> {
             }
         }
 
-        let src_reg = self.parse_expr(instructions)?;
-
+        let src = self.parse_expr(instructions)?;
         if accessors.is_empty() {
             if !info.is_mut {
                 return Err(JitError::RedefinitionOfImmutableVariable(
-                    name.into(),
-                    loc.line as usize,
-                    loc.col as usize,
+                    id.into(),
+                    self.line,
+                    0,
                     info.first_line,
                 ));
             }
             if info.is_global {
                 instructions.push(Instruction::StoreGlobal {
                     global: info.idx,
-                    src: src_reg,
+                    src,
                 });
             } else {
-                instructions.push(Instruction::Move {
-                    dst: info.idx,
-                    src: src_reg,
-                });
+                instructions.push(Instruction::Move { dst: info.idx, src });
             }
         } else {
-            let mut current_reg = base_reg;
-            for accessor in accessors.iter().take(accessors.len() - 1) {
-                let next_reg = self.alloc_reg();
-                match accessor {
-                    Accessor::Index(index_reg) => {
-                        instructions.push(Instruction::ListGet {
-                            dst: next_reg,
-                            list: current_reg,
-                            index_reg: *index_reg,
-                            loc: self.loc(),
-                        });
-                    }
-                    Accessor::Field(name_id) => {
-                        instructions.push(Instruction::ObjectGet {
-                            dst: next_reg,
-                            obj: current_reg,
-                            name_id: *name_id,
-                            loc: self.loc(),
-                        });
-                    }
-                }
-                current_reg = next_reg;
-            }
-            match *accessors.last().unwrap() {
-                Accessor::Index(index_reg) => {
-                    instructions.push(Instruction::ListSet {
-                        list: current_reg,
+            let mut current = self.load_var(info, instructions);
+            for i in 0..accessors.len() - 1 {
+                let dst = self.alloc_reg();
+                match accessors[i] {
+                    Accessor::Index(index_reg) => instructions.push(Instruction::ListGet {
+                        dst,
+                        list: current,
                         index_reg,
-                        src: src_reg,
-                        loc: self.loc(),
-                    });
-                }
-                Accessor::Field(name_id) => {
-                    instructions.push(Instruction::ObjectSet {
-                        obj: current_reg,
+                        loc,
+                    }),
+                    Accessor::Field(name_id) => instructions.push(Instruction::ObjectGet {
+                        dst,
+                        obj: current,
                         name_id,
-                        src: src_reg,
-                        loc: self.loc(),
-                    });
+                        loc,
+                    }),
                 }
+                current = dst;
+            }
+            match accessors.last().unwrap() {
+                Accessor::Index(index_reg) => instructions.push(Instruction::ListSet {
+                    list: current,
+                    index_reg: *index_reg,
+                    src,
+                    loc,
+                }),
+                Accessor::Field(name_id) => instructions.push(Instruction::ObjectSet {
+                    obj: current,
+                    name_id: *name_id,
+                    src,
+                    loc,
+                }),
             }
         }
-
         Ok(())
     }
 
-    fn parse_var(
+    fn parse_var_decl(
         &mut self,
         is_mut: bool,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), JitError> {
-        let loc = self.loc();
-        let name = match self.next_token() {
-            Some(Ok(Token::Identifier(id))) => id,
+        self.advance()?; // consume el/le
+        let id = match self.advance()? {
+            (Token::Identifier(id), _) => id,
             _ => {
                 return Err(JitError::Parsing(
                     "Expected identifier".into(),
-                    loc.line as usize,
-                    loc.col as usize,
+                    self.line,
+                    0,
                 ));
             }
         };
-        if !matches!(self.next_token(), Some(Ok(Token::Colon))) {
-            return Err(JitError::Parsing(
-                "Expected ':'".into(),
-                loc.line as usize,
-                loc.col as usize,
-            ));
-        }
+        self.expect(Token::Colon)?;
+        let src = self.parse_expr(instructions)?;
 
         let is_global = !self.is_in_function && !self.is_in_spawn;
         let idx = if is_global {
@@ -899,38 +764,75 @@ impl<'source> Parser<'source> {
             is_global,
             first_line: self.line,
         };
-        self.var_map.insert(name, info.clone());
 
-        let src_reg = self.parse_expr(instructions)?;
         if is_global {
-            instructions.push(Instruction::StoreGlobal {
-                global: idx,
-                src: src_reg,
-            });
+            self.globals.insert(id, info);
+            instructions.push(Instruction::StoreGlobal { global: idx, src });
         } else {
-            instructions.push(Instruction::Move {
-                dst: idx,
-                src: src_reg,
-            });
+            self.locals.insert(id, info);
+            instructions.push(Instruction::Move { dst: idx, src });
         }
         Ok(())
     }
 
     fn parse_block(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
         self.skip_newlines();
-        if !matches!(self.next_token(), Some(Ok(Token::LBrace))) {
-            return Err(JitError::Parsing("Expected '{'".into(), self.line, 0));
+        self.expect(Token::LBrace)?;
+        while self.peek().is_some() && self.peek() != Some(Token::RBrace) {
+            if let Some(res) = self.parse_statement(instructions) {
+                res?;
+            } else {
+                break;
+            }
         }
-        while let Some(res) = self.parse_statement(instructions) {
-            res?;
+        self.expect(Token::RBrace)?;
+        Ok(())
+    }
+
+    fn parse_if_stmt(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
+        let cond = self.parse_expr(instructions)?;
+        let jump_if_false_idx = instructions.len();
+        instructions.push(Instruction::Jump(0));
+        self.parse_block(instructions)?;
+
+        if matches!(self.peek(), Some(Token::Else)) {
+            self.advance()?;
+            let jump_to_end_idx = instructions.len();
+            instructions.push(Instruction::Jump(0));
+            instructions[jump_if_false_idx] = Instruction::JumpIfFalse {
+                cond,
+                target: instructions.len(),
+            };
+            self.parse_block(instructions)?;
+            instructions[jump_to_end_idx] = Instruction::Jump(instructions.len());
+        } else {
+            instructions[jump_if_false_idx] = Instruction::JumpIfFalse {
+                cond,
+                target: instructions.len(),
+            };
         }
         Ok(())
     }
 
-    fn parse_for(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
+    fn parse_while_loop(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
+        let start = instructions.len();
+        let cond = self.parse_expr(instructions)?;
+        let jump_idx = instructions.len();
+        instructions.push(Instruction::Jump(0));
+        self.parse_block(instructions)?;
+        instructions.push(Instruction::Jump(start));
+        instructions[jump_idx] = Instruction::JumpIfFalse {
+            cond,
+            target: instructions.len(),
+        };
+        Ok(())
+    }
+
+    fn parse_for_loop(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
         let loc = self.loc();
-        let it_var = match self.next_token() {
-            Some(Ok(Token::Identifier(id))) => id,
+        self.advance()?; // for
+        let id = match self.advance()? {
+            (Token::Identifier(id), _) => id,
             _ => {
                 return Err(JitError::Parsing(
                     "Expected identifier".into(),
@@ -939,17 +841,14 @@ impl<'source> Parser<'source> {
                 ));
             }
         };
-        if !matches!(self.next_token(), Some(Ok(Token::In))) {
-            return Err(JitError::Parsing("Expected 'in'".into(), self.line, 0));
-        }
-        let start = self.parse_expr(instructions)?;
-        if !matches!(self.next_token(), Some(Ok(Token::Range))) {
-            return Err(JitError::Parsing("Expected '..'".into(), self.line, 0));
-        }
-        let end = self.parse_expr(instructions)?;
+        self.expect(Token::In)?;
+        let start_val = self.parse_expr(instructions)?;
+        self.expect(Token::Range)?;
+        let end_val = self.parse_expr(instructions)?;
+
         let var_idx = self.alloc_reg();
-        self.var_map.insert(
-            it_var,
+        self.locals.insert(
+            id,
             VarInfo {
                 idx: var_idx,
                 is_mut: true,
@@ -959,48 +858,34 @@ impl<'source> Parser<'source> {
         );
         instructions.push(Instruction::Move {
             dst: var_idx,
-            src: start,
+            src: start_val,
         });
+
         let loop_start = instructions.len();
-        let cond_reg = self.alloc_reg();
+        let cond = self.alloc_reg();
         instructions.push(Instruction::Lt {
-            dst: cond_reg,
+            dst: cond,
             lhs: var_idx,
-            rhs: end,
+            rhs: end_val,
             loc,
         });
         let jump_idx = instructions.len();
         instructions.push(Instruction::Jump(0));
+
         self.parse_block(instructions)?;
         instructions.push(Instruction::Increment(var_idx));
         instructions.push(Instruction::Jump(loop_start));
-        let end_pc = instructions.len();
-        instructions[jump_idx] = Instruction::JumpIfFalse {
-            cond: cond_reg,
-            target: end_pc,
-        };
-        Ok(())
-    }
-
-    fn parse_while(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
-        let start_pc = instructions.len();
-        let cond = self.parse_expr(instructions)?;
-        let jump_idx = instructions.len();
-        instructions.push(Instruction::Jump(0));
-        self.parse_block(instructions)?;
-        instructions.push(Instruction::Jump(start_pc));
-        let end_pc = instructions.len();
         instructions[jump_idx] = Instruction::JumpIfFalse {
             cond,
-            target: end_pc,
+            target: instructions.len(),
         };
         Ok(())
     }
 
-    fn parse_spawn(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
-        let was_in_spawn = self.is_in_spawn;
+    fn parse_spawn_stmt(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
+        let old_spawn = self.is_in_spawn;
         self.is_in_spawn = true;
-        self.captures_stack.push(std::collections::HashSet::new());
+        self.captures_stack.push(FxHashSet::default());
         self.spawn_start_regs.push(self.next_reg);
 
         let mut body = Vec::new();
@@ -1009,10 +894,10 @@ impl<'source> Parser<'source> {
 
         let captures_set = self.captures_stack.pop().unwrap();
         self.spawn_start_regs.pop();
-        self.is_in_spawn = was_in_spawn;
+        self.is_in_spawn = old_spawn;
 
         let mut captures: Vec<usize> = captures_set.into_iter().collect();
-        captures.sort_unstable(); // Sort for deterministic results
+        captures.sort_unstable();
 
         instructions.push(Instruction::Spawn {
             instructions: Arc::from(body),
@@ -1022,74 +907,43 @@ impl<'source> Parser<'source> {
         Ok(())
     }
 
-    fn track_capture(&mut self, reg: usize) {
-        for i in (0..self.spawn_start_regs.len()).rev() {
-            if reg < self.spawn_start_regs[i] {
-                self.captures_stack[i].insert(reg);
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn parse_fn(&mut self) -> Result<(), JitError> {
-        let loc = self.loc();
-        let name = match self.next_token() {
-            Some(Ok(Token::Identifier(id))) => id,
+    fn parse_fn_decl(&mut self) -> Result<(), JitError> {
+        let name = match self.advance()? {
+            (Token::Identifier(id), _) => id,
             _ => {
                 return Err(JitError::Parsing(
-                    "Expected identifier after 'fn'".into(),
-                    loc.line as usize,
-                    loc.col as usize,
+                    "Expected function name".into(),
+                    self.line,
+                    0,
                 ));
             }
         };
-
-        if !matches!(self.next_token(), Some(Ok(Token::LParen))) {
-            return Err(JitError::Parsing("Expected '('".into(), self.line, 0));
-        }
-
+        self.expect(Token::LParen)?;
         let mut params = Vec::new();
-        if !matches!(self.peek(), Some(Ok(Token::RParen))) {
+        if !matches!(self.peek(), Some(Token::RParen)) {
             loop {
-                match self.next_token() {
-                    Some(Ok(Token::Identifier(id))) => params.push(id),
-                    _ => {
-                        return Err(JitError::Parsing(
-                            "Expected parameter name".into(),
-                            self.line,
-                            0,
-                        ));
-                    }
+                match self.advance()? {
+                    (Token::Identifier(id), _) => params.push(id),
+                    _ => break,
                 }
-                if matches!(self.peek(), Some(Ok(Token::Comma))) {
-                    self.next_token();
+                if matches!(self.peek(), Some(Token::Comma)) {
+                    self.advance()?;
                 } else {
                     break;
                 }
             }
         }
+        self.expect(Token::RParen)?;
 
-        if !matches!(self.next_token(), Some(Ok(Token::RParen))) {
-            return Err(JitError::Parsing("Expected ')'".into(), self.line, 0));
-        }
-
-        let func_id = self.functions.len() as u32;
-        self.function_map.insert(name.to_string(), func_id);
-
-        let old_vars = self.var_map.clone();
-        let old_next_reg = self.next_reg;
-        let old_is_in_spawn = self.is_in_spawn;
-
-        let old_is_in_function = self.is_in_function;
-        self.var_map.retain(|_, v| v.is_global);
+        let old_locals = std::mem::take(&mut self.locals);
+        let (old_reg, old_spawn, old_func) = (self.next_reg, self.is_in_spawn, self.is_in_function);
         self.next_reg = 0;
         self.is_in_spawn = false;
         self.is_in_function = true;
 
         for &p in &params {
             let r = self.alloc_reg();
-            self.var_map.insert(
+            self.locals.insert(
                 p,
                 VarInfo {
                     idx: r,
@@ -1102,31 +956,29 @@ impl<'source> Parser<'source> {
 
         let mut body = Vec::new();
         self.parse_block(&mut body)?;
-
         if !matches!(body.last(), Some(Instruction::Return(_))) {
             body.push(Instruction::Return(None));
         }
 
         let name_id = self.intern(name);
-        self.functions.push(crate::compiler::UserFunction {
+        self.functions.push(UserFunction {
             name_id,
             instructions: Arc::from(body),
             locals_count: self.next_reg,
             params_count: params.len(),
         });
 
-        self.var_map = old_vars;
-        self.next_reg = old_next_reg;
-        self.is_in_spawn = old_is_in_spawn;
-        self.is_in_function = old_is_in_function;
-
+        self.locals = old_locals;
+        self.next_reg = old_reg;
+        self.is_in_spawn = old_spawn;
+        self.is_in_function = old_func;
         Ok(())
     }
 
-    fn parse_return(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
+    fn parse_return_stmt(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
         let val = if !matches!(
             self.peek(),
-            Some(Ok(Token::Newline)) | Some(Ok(Token::RBrace)) | None
+            None | Some(Token::Newline) | Some(Token::RBrace)
         ) {
             Some(self.parse_expr(instructions)?)
         } else {
@@ -1136,36 +988,35 @@ impl<'source> Parser<'source> {
         Ok(())
     }
 
-    fn parse_if(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
-        let cond = self.parse_expr(instructions)?;
-        let jump_if_false_idx = instructions.len();
-        instructions.push(Instruction::Jump(0)); // Placeholder
+    fn get_var(&self, id: &str) -> Option<VarInfo> {
+        self.locals
+            .get(id)
+            .or_else(|| self.globals.get(id))
+            .copied()
+    }
 
-        self.parse_block(instructions)?;
-
-        if matches!(self.peek(), Some(Ok(Token::Else))) {
-            self.next_token(); // consume else
-            let jump_to_end_idx = instructions.len();
-            instructions.push(Instruction::Jump(0)); // Placeholder for skip else
-
-            let else_start_pc = instructions.len();
-            instructions[jump_if_false_idx] = Instruction::JumpIfFalse {
-                cond,
-                target: else_start_pc,
-            };
-
-            self.parse_block(instructions)?;
-            let end_pc = instructions.len();
-            instructions[jump_to_end_idx] = Instruction::Jump(end_pc);
+    fn load_var(&mut self, info: VarInfo, instructions: &mut Vec<Instruction>) -> usize {
+        if info.is_global {
+            let r = self.alloc_reg();
+            instructions.push(Instruction::LoadGlobal {
+                dst: r,
+                global: info.idx,
+            });
+            r
         } else {
-            let end_pc = instructions.len();
-            instructions[jump_if_false_idx] = Instruction::JumpIfFalse {
-                cond,
-                target: end_pc,
-            };
+            self.track_capture(info.idx);
+            info.idx
         }
+    }
 
-        Ok(())
+    fn track_capture(&mut self, reg: usize) {
+        for i in (0..self.spawn_start_regs.len()).rev() {
+            if reg < self.spawn_start_regs[i] {
+                self.captures_stack[i].insert(reg);
+            } else {
+                break;
+            }
+        }
     }
 }
 
@@ -1178,11 +1029,8 @@ fn unescape_string(s: &str) -> String {
                 Some('n') => res.push('\n'),
                 Some('r') => res.push('\r'),
                 Some('t') => res.push('\t'),
-                Some('b') => res.push('\x08'),
-                Some('f') => res.push('\x0c'),
                 Some('\\') => res.push('\\'),
                 Some('"') => res.push('"'),
-                Some('/') => res.push('/'),
                 Some('u') => {
                     let mut hex = String::with_capacity(4);
                     for _ in 0..4 {
@@ -1193,15 +1041,7 @@ fn unescape_string(s: &str) -> String {
                     if let Ok(n) = u32::from_str_radix(&hex, 16) {
                         if let Some(uc) = std::char::from_u32(n) {
                             res.push(uc);
-                        } else {
-                            res.push('\\');
-                            res.push('u');
-                            res.push_str(&hex);
                         }
-                    } else {
-                        res.push('\\');
-                        res.push('u');
-                        res.push_str(&hex);
                     }
                 }
                 Some(other) => {

@@ -4,15 +4,14 @@ use std::num::{ParseFloatError, ParseIntError};
 use logos::Logos;
 
 /// Errors that can occur during the lexing phase.
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub enum LexingError {
     /// Failed to parse an integer literal.
-    InvalidInteger(String),
+    InvalidInteger,
     /// Failed to parse a floating-point literal.
-    InvalidFloat(String),
+    InvalidFloat,
     /// Encountered a character that is not valid in the source code.
     NonAsciiCharacter(char),
-    /// General catch-all for other lexing errors.
     #[default]
     Other,
 }
@@ -27,7 +26,7 @@ impl LexingError {
 }
 
 /// The set of tokens produced by the lexer.
-#[derive(Logos, Debug, PartialEq, Clone)]
+#[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(error(LexingError, LexingError::from_lexer))]
 #[logos(skip r"[ \t\f]+")]
 #[logos(skip r"/\*(?:[^*]|\*[^/])*\*/")]
@@ -156,8 +155,8 @@ pub enum Token<'source> {
 impl fmt::Display for LexingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LexingError::InvalidInteger(s) => write!(f, "Invalid integer: {}", s),
-            LexingError::InvalidFloat(s) => write!(f, "Invalid float: {}", s),
+            LexingError::InvalidInteger => write!(f, "Invalid integer"),
+            LexingError::InvalidFloat => write!(f, "Invalid float"),
             LexingError::NonAsciiCharacter(c) => write!(f, "Non-ASCII character: {}", c),
             LexingError::Other => write!(f, "Unknown lexing error"),
         }
@@ -167,17 +166,13 @@ impl fmt::Display for LexingError {
 impl std::error::Error for LexingError {}
 
 impl From<ParseIntError> for LexingError {
-    fn from(err: ParseIntError) -> Self {
-        use std::num::IntErrorKind::*;
-        match err.kind() {
-            PosOverflow | NegOverflow => LexingError::InvalidInteger("overflow error".to_owned()),
-            _ => LexingError::InvalidInteger("other error".to_owned()),
-        }
+    fn from(_: ParseIntError) -> Self {
+        LexingError::InvalidInteger
     }
 }
 
 impl From<ParseFloatError> for LexingError {
     fn from(_err: ParseFloatError) -> Self {
-        LexingError::InvalidFloat("float parse error".to_owned())
+        LexingError::InvalidFloat
     }
 }
