@@ -65,7 +65,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
 }
 
 #[async_recursion::async_recursion]
-async fn execute_bytecode(
+pub async fn execute_bytecode(
     instructions: Arc<[Instruction]>,
     ctx: Arc<Context>,
     join_set: &mut JoinSet<Result<(), JitError>>,
