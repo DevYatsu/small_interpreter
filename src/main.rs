@@ -1,16 +1,37 @@
+mod backends;
 mod compiler;
 mod error;
 mod lexer;
 mod parser;
-mod vm;
 
+use crate::backends::Backend;
 use crate::error::JitError;
 use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), JitError> {
-    let content = std::fs::read_to_string("./main.pi")
-        .map_err(|e| JitError::Runtime(format!("Failed to read file: {}", e), 0, 0))?;
+    let mut args = pico_args::Arguments::from_env();
+
+    // Check if help is requested
+    if args.contains(["-h", "--help"]) {
+        println!("Usage: small_jit [FILE] [-b BACKEND]");
+        println!("Backends: interpreter (default), cranelift");
+        return Ok(());
+    }
+
+    let backend_name: String = args
+        .opt_value_from_str(["-b", "--backend"])
+        .map_err(|e| JitError::Runtime(format!("Argument error: {}", e), 0, 0))?
+        .or_else(|| std::env::var("JIT_BACKEND").ok())
+        .unwrap_or_else(|| "interpreter".to_string());
+
+    let file_path: String = args
+        .free_from_str()
+        .unwrap_or_else(|_| "main.pi".to_string());
+
+    let content = std::fs::read_to_string(&file_path).map_err(|e| {
+        JitError::Runtime(format!("Failed to read file {}: {}", file_path, e), 0, 0)
+    })?;
 
     let parser = parser::Parser::new(&content);
     let program = match parser.compile() {
@@ -23,8 +44,16 @@ async fn main() -> Result<(), JitError> {
 
     let start = Instant::now();
 
-    // Run the program on the Tokio runtime
-    vm::run(program).await?;
+    let backend: Box<dyn Backend> = match backend_name.as_str() {
+        "cranelift" => Box::new(backends::cranelift::CraneliftBackend),
+        _ => Box::new(backends::interpreter::Interpreter),
+    };
+
+    println!(
+        "--- Running {} with Backend: {} ---",
+        file_path, backend_name
+    );
+    backend.run(program).await?;
 
     let total = start.elapsed();
 
