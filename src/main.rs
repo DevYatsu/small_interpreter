@@ -42,18 +42,20 @@ async fn main() -> Result<(), JitError> {
         }
     };
 
+    println!("Compiled program: {} instructions, {} functions", program.instructions.len(), program.functions.len());
+
     let start = Instant::now();
 
-    let backend: Box<dyn Backend> = match backend_name.as_str() {
-        "cranelift" => Box::new(backends::cranelift::CraneliftBackend),
-        _ => Box::new(backends::interpreter::Interpreter),
-    };
+    let backend: Box<dyn Backend> = Box::new(backends::interpreter::Interpreter);
 
     println!(
         "--- Running {} with Backend: {} ---",
         file_path, backend_name
     );
-    backend.run(program).await?;
+    if let Err(e) = backend.run(program).await {
+        print_error(&content, &e);
+        std::process::exit(1);
+    }
 
     let total = start.elapsed();
 

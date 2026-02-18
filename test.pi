@@ -1,0 +1,10 @@
+le short: "hi"
+le long: "this is a long string that definitely won't fit in SSO"
+print("Short:", short)
+print("Long:", long)
+
+le x: 10
+spawn {
+    print("Spawned Short:", short)
+    print("Spawned Long:", long)
+}

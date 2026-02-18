@@ -30,6 +30,14 @@ pub enum Token<'source> {
     MutableVar,
     #[token("le")]
     ImmutableVar,
+    #[token("fn")]
+    Fn,
+    #[token("return")]
+    Return,
+    #[token("if")]
+    If,
+    #[token("else")]
+    Else,
     #[token(":")]
     Colon,
     #[token("\n")]
@@ -66,6 +74,18 @@ pub enum Token<'source> {
     Mul,
     #[token("/")]
     Div,
+    #[token("==")]
+    Eq,
+    #[token("!=")]
+    Ne,
+    #[token("<")]
+    Lt,
+    #[token("<=")]
+    Le,
+    #[token(">")]
+    Gt,
+    #[token(">=")]
+    Ge,
     #[token("false", |_| false)]
     #[token("true", |_| true)]
     Bool(bool),

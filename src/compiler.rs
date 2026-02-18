@@ -24,11 +24,10 @@ impl From<(usize, usize)> for Loc {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Value(u64);
 
-const QNAN: u64 = 0x7ffc000000000000;
+const QNAN: u64 = 0x7ff0000000000000;
 const TAG_MASK: u64 = 0x000F000000000000;
 const TAG_BOOL: u64 = 0x0001000000000000;
-const TAG_STR: u64 = 0x0002000000000000;
-const TAG_LIST: u64 = 0x0003000000000000;
+const TAG_OBJ: u64 = 0x0002000000000000;
 
 impl Value {
     #[inline(always)]
@@ -42,8 +41,23 @@ impl Value {
     }
 
     #[inline(always)]
-    pub fn string(id: u32) -> Self {
-        Self(QNAN | TAG_STR | (id as u64))
+    pub fn object(id: u32) -> Self {
+        Self(QNAN | TAG_OBJ | (id as u64))
+    }
+
+    pub fn sso(s: &str) -> Option<Self> {
+        if s.len() > 6 {
+            return None;
+        }
+
+        // Tag is 3 + length.
+        let bits = QNAN | ((3 + s.len() as u64) << 48);
+
+        let mut payload: u64 = 0;
+        for (i, byte) in s.as_bytes().iter().enumerate() {
+            payload |= (*byte as u64) << (i * 8);
+        }
+        Some(Self(bits | payload))
     }
 
     #[inline(always)]
@@ -65,23 +79,23 @@ impl Value {
     }
 
     #[inline(always)]
-    pub fn as_string_id(self) -> Option<u32> {
-        if (self.0 & (QNAN | TAG_MASK)) == (QNAN | TAG_STR) {
+    pub fn as_obj_id(self) -> Option<u32> {
+        if (self.0 & (QNAN | TAG_MASK)) == (QNAN | TAG_OBJ) {
             Some((self.0 & 0xFFFFFFFF) as u32)
         } else {
             None
         }
     }
 
-    #[inline(always)]
-    pub fn list_id(id: u32) -> Self {
-        Self(QNAN | TAG_LIST | (id as u64))
-    }
-
-    #[inline(always)]
-    pub fn as_list_id(self) -> Option<u32> {
-        if (self.0 & (QNAN | TAG_MASK)) == (QNAN | TAG_LIST) {
-            Some((self.0 & 0xFFFFFFFF) as u32)
+    pub fn as_sso(&self) -> Option<String> {
+        let tag = (self.0 & TAG_MASK) >> 48;
+        if tag >= 3 && tag <= 9 {
+            let len = (tag - 3) as usize;
+            let mut bytes = Vec::with_capacity(len);
+            for i in 0..len {
+                bytes.push(((self.0 >> (i * 8)) & 0xFF) as u8);
+            }
+            Some(String::from_utf8_lossy(&bytes).to_string())
         } else {
             None
         }
@@ -146,7 +160,37 @@ pub enum Instruction {
         loc: Loc,
     },
     Increment(usize),
-    LessThan {
+    Eq {
+        dst: usize,
+        lhs: usize,
+        rhs: usize,
+        loc: Loc,
+    },
+    Ne {
+        dst: usize,
+        lhs: usize,
+        rhs: usize,
+        loc: Loc,
+    },
+    Lt {
+        dst: usize,
+        lhs: usize,
+        rhs: usize,
+        loc: Loc,
+    },
+    Le {
+        dst: usize,
+        lhs: usize,
+        rhs: usize,
+        loc: Loc,
+    },
+    Gt {
+        dst: usize,
+        lhs: usize,
+        rhs: usize,
+        loc: Loc,
+    },
+    Ge {
         dst: usize,
         lhs: usize,
         rhs: usize,
@@ -155,6 +199,7 @@ pub enum Instruction {
     Spawn {
         instructions: Arc<[Instruction]>,
         locals_count: usize,
+        captures: Arc<[usize]>,
     },
     NewList {
         dst: usize,
@@ -178,11 +223,26 @@ pub enum Instruction {
         dst: Option<usize>,
         loc: Loc,
     },
+    Call {
+        func_id: u32,
+        args_regs: Arc<[usize]>,
+        dst: Option<usize>,
+    },
+    Return(Option<usize>),
+}
+
+#[derive(Debug, Clone)]
+pub struct UserFunction {
+    pub name_id: u32,
+    pub instructions: Arc<[Instruction]>,
+    pub locals_count: usize,
+    pub params_count: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct Program {
     pub instructions: Arc<[Instruction]>,
+    pub functions: Arc<[UserFunction]>,
     pub string_pool: Arc<[Arc<str>]>,
     pub locals_count: usize,
     pub globals_count: usize,
