@@ -1,0 +1,26 @@
+le a: "Hello, "
+le b: "World!"
+le c: a + b
+print(c)
+
+le s1: "Small"
+le s2: "JIT"
+le s3: s1 + " " + s2
+print(s3)
+
+if s3 == "Small JIT" {
+    print("SUCCESS")
+} else {
+    print("FAILURE")
+}
+
+// Global concat
+el g1: "Base"
+fn append_to_g(suffix) {
+    g1: g1 + suffix
+}
+append_to_g("ment")
+print(g1)
+if g1 == "Basement" {
+    print("GLOBAL SUCCESS")
+}

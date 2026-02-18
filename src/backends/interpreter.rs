@@ -217,7 +217,7 @@ pub async fn execute_bytecode(
                 }
                 let f_regs: Arc<[AtomicU64]> = Arc::from(f_regs_vec);
 
-                let res = execute_bytecode(
+                let _ = execute_bytecode(
                     func.instructions.clone(),
                     ctx.clone(),
                     join_set,
@@ -273,9 +273,24 @@ pub async fn execute_bytecode(
                                 .get_unchecked(*dst)
                                 .store(Value::number(lv + rv).to_bits(), Ordering::Relaxed);
                         }
+                    } else if let (Some(ls), Some(rs)) =
+                        (ctx.get_string_value(l), ctx.get_string_value(r))
+                    {
+                        let combined = ls + &rs;
+                        if let Some(sso) = Value::sso(&combined) {
+                            unsafe {
+                                registers
+                                    .get_unchecked(*dst)
+                                    .store(sso.to_bits(), Ordering::Relaxed);
+                            }
+                        } else {
+                            ctx.alloc(ManagedObject::String(Arc::from(combined)), unsafe {
+                                registers.get_unchecked(*dst)
+                            });
+                        }
                     } else {
                         return Err(JitError::Runtime(
-                            "Math error: expected numbers".into(),
+                            "Add error: expected numbers or strings".into(),
                             loc.line as usize,
                             loc.col as usize,
                         ));
@@ -361,10 +376,16 @@ pub async fn execute_bytecode(
                 let r = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
                 let lv = Value::from_bits(l);
                 let rv = Value::from_bits(r);
-                let eq = if let (Some(ln), Some(rn)) = (lv.as_number(), rv.as_number()) {
+                let eq = if l == r {
+                    true
+                } else if let (Some(ln), Some(rn)) = (lv.as_number(), rv.as_number()) {
                     ln == rn
+                } else if let (Some(ls), Some(rs)) =
+                    (ctx.get_string_value(lv), ctx.get_string_value(rv))
+                {
+                    ls == rs
                 } else {
-                    l == r
+                    false
                 };
                 unsafe {
                     registers
@@ -379,23 +400,41 @@ pub async fn execute_bytecode(
                 rhs,
                 loc: _,
             } => {
-                let l = registers[*lhs].load(Ordering::Relaxed);
-                let r = registers[*rhs].load(Ordering::Relaxed);
+                let l = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
+                let r = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
                 let lv = Value::from_bits(l);
                 let rv = Value::from_bits(r);
-                let eq = if let (Some(ln), Some(rn)) = (lv.as_number(), rv.as_number()) {
+                let eq = if l == r {
+                    true
+                } else if let (Some(ln), Some(rn)) = (lv.as_number(), rv.as_number()) {
                     ln == rn
+                } else if let (Some(ls), Some(rs)) =
+                    (ctx.get_string_value(lv), ctx.get_string_value(rv))
+                {
+                    ls == rs
                 } else {
-                    l == r
+                    false
                 };
-                registers[*dst].store(Value::bool(!eq).to_bits(), Ordering::Relaxed);
+                unsafe {
+                    registers
+                        .get_unchecked(*dst)
+                        .store(Value::bool(!eq).to_bits(), Ordering::Relaxed);
+                }
                 pc += 1;
             }
             Instruction::Lt { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
+                let l = Value::from_bits(unsafe {
+                    registers.get_unchecked(*lhs).load(Ordering::Relaxed)
+                });
+                let r = Value::from_bits(unsafe {
+                    registers.get_unchecked(*rhs).load(Ordering::Relaxed)
+                });
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::bool(lv < rv).to_bits(), Ordering::Relaxed);
+                    unsafe {
+                        registers
+                            .get_unchecked(*dst)
+                            .store(Value::bool(lv < rv).to_bits(), Ordering::Relaxed);
+                    }
                 } else {
                     return Err(JitError::Runtime(
                         "Compare error: expected numbers".into(),
@@ -406,10 +445,18 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Le { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
+                let l = Value::from_bits(unsafe {
+                    registers.get_unchecked(*lhs).load(Ordering::Relaxed)
+                });
+                let r = Value::from_bits(unsafe {
+                    registers.get_unchecked(*rhs).load(Ordering::Relaxed)
+                });
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::bool(lv <= rv).to_bits(), Ordering::Relaxed);
+                    unsafe {
+                        registers
+                            .get_unchecked(*dst)
+                            .store(Value::bool(lv <= rv).to_bits(), Ordering::Relaxed);
+                    }
                 } else {
                     return Err(JitError::Runtime(
                         "Compare error: expected numbers".into(),
@@ -420,10 +467,18 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Gt { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
+                let l = Value::from_bits(unsafe {
+                    registers.get_unchecked(*lhs).load(Ordering::Relaxed)
+                });
+                let r = Value::from_bits(unsafe {
+                    registers.get_unchecked(*rhs).load(Ordering::Relaxed)
+                });
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::bool(lv > rv).to_bits(), Ordering::Relaxed);
+                    unsafe {
+                        registers
+                            .get_unchecked(*dst)
+                            .store(Value::bool(lv > rv).to_bits(), Ordering::Relaxed);
+                    }
                 } else {
                     return Err(JitError::Runtime(
                         "Compare error: expected numbers".into(),
@@ -434,10 +489,18 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Ge { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
+                let l = Value::from_bits(unsafe {
+                    registers.get_unchecked(*lhs).load(Ordering::Relaxed)
+                });
+                let r = Value::from_bits(unsafe {
+                    registers.get_unchecked(*rhs).load(Ordering::Relaxed)
+                });
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::bool(lv >= rv).to_bits(), Ordering::Relaxed);
+                    unsafe {
+                        registers
+                            .get_unchecked(*dst)
+                            .store(Value::bool(lv >= rv).to_bits(), Ordering::Relaxed);
+                    }
                 } else {
                     return Err(JitError::Runtime(
                         "Compare error: expected numbers".into(),

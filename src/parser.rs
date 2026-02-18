@@ -7,29 +7,51 @@ use logos::{Lexer, Logos};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+/// Metadata about a variable in the current scope.
 #[derive(Clone)]
 struct VarInfo {
+    /// The register index assigned to this variable.
     idx: usize,
+    /// Whether the variable is mutable ('el') or immutable ('le').
     is_mut: bool,
+    /// Whether this variable is a global.
     is_global: bool,
+    /// The line number where the variable was first defined.
     first_line: usize,
 }
 
+/// The Parser transforms source code into a compiled Program (bytecode).
+///
+/// It performs lexical analysis (via Lexer), handles variable scoping,
+/// manages string interning, and emits bytecode instructions.
 pub struct Parser<'source> {
+    /// The Logos lexer for tokenizing the input.
     lexer: Lexer<'source, Token<'source>>,
+    /// Current line number in the source.
     line: usize,
+    /// Character offset of the start of the current line.
     line_start: usize,
+    /// Mapping from variable names to their metadata.
     var_map: FxHashMap<&'source str, VarInfo>,
     /// Global string pool for interning.
     strings: Vec<Arc<str>>,
+    /// Mapping for deduplicating strings in the pool.
     string_map: FxHashMap<String, u32>,
+    /// Counter for the next available register index in the current function/main block.
     next_reg: usize,
+    /// Counter for the next available global index.
     next_global: usize,
+    /// Whether currently parsing inside a 'spawn' block.
     is_in_spawn: bool,
+    /// Whether currently parsing inside a function body.
     is_in_function: bool,
+    /// Stack of registers captured by nested 'spawn' blocks.
     captures_stack: Vec<std::collections::HashSet<usize>>,
+    /// Starting register index for each active 'spawn' block.
     spawn_start_regs: Vec<usize>,
+    /// All compiled functions in the program.
     functions: Vec<crate::compiler::UserFunction>,
+    /// Mapping from function names to their ID.
     function_map: FxHashMap<String, u32>,
 }
 
@@ -93,7 +115,7 @@ impl<'source> Parser<'source> {
         r
     }
 
-    fn peek(&self) -> Option<Result<Token<'source>, crate::lexer::LexingError>> {
+    fn peek(&mut self) -> Option<Result<Token<'source>, crate::lexer::LexingError>> {
         self.lexer.clone().next()
     }
 

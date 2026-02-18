@@ -12,34 +12,59 @@ pub trait Backend {
     fn run(&self, program: Program) -> Pin<Box<dyn Future<Output = Result<(), JitError>> + Send>>;
 }
 
+/// Represents the age of an object in the generational garbage collector.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Generation {
+    /// Newly allocated objects start here.
     Nursery,
+    /// Objects that survive at least one GC cycle are promoted to the Tenured generation.
     Tenured,
 }
 
+/// A heap-allocated object managed by the garbage collector.
 pub enum ManagedObject {
+    /// A UTF-8 string.
     String(Arc<str>),
+    /// A fixed-size list of values, where each element is an atomic 64-bit word.
     List(Box<[AtomicU64]>),
 }
 
+/// Metadata and storage for an object on the heap.
 pub struct HeapObject {
+    /// The actual object data.
     pub obj: ManagedObject,
+    /// The ID of the last GC cycle that visited this object (used for marking).
     pub last_gc_id: u32,
+    /// The generation of this object (Nursery or Tenured).
     pub generation: Generation,
 }
 
+/// The execution context shared across all threads and tasks.
+///
+/// It contains the global state, the heap, the string pool, and metadata
+/// required for synchronization and garbage collection.
 pub struct Context {
+    /// Global variables shared by all tasks.
     pub globals: Vec<AtomicU64>,
+    /// Interned string pool.
     pub string_pool: Arc<[Arc<str>]>,
+    /// The shared heap, protected by a Read-Write lock.
     pub heap: RwLock<Vec<Option<HeapObject>>>,
+    /// List of indices in the heap that are currently free/available for reuse.
     pub free_list: Mutex<Vec<u32>>,
+    /// List of object IDs in the Nursery generation (used for Minor GC).
     pub nursery_ids: Mutex<Vec<u32>>,
+    /// Registered native functions mapped by their ID.
     pub native_fns: Vec<Option<NativeFn>>,
+    /// Tracks active register sets for all running tasks (used as GC roots).
     pub active_registers: RwLock<Vec<Arc<[AtomicU64]>>>,
+    /// Set of tenured objects that point to objects in the nursery.
     pub remembered_set: Mutex<rustc_hash::FxHashSet<u32>>,
+    /// Monotonically increasing counter of GC cycles performed.
     pub gc_count: std::sync::atomic::AtomicU32,
+    /// Number of allocations performed since the last garbage collection.
     pub alloc_since_gc: std::sync::atomic::AtomicUsize,
+    /// The user-defined functions compiled into bytecode.
     pub functions: Arc<[crate::compiler::UserFunction]>,
 }
 
@@ -226,7 +251,7 @@ impl Context {
         }
     }
 
-    fn check_points_to_nursery(&self, obj: &HeapObject, heap: &[Option<HeapObject>]) -> bool {
+    pub fn check_points_to_nursery(&self, obj: &HeapObject, heap: &[Option<HeapObject>]) -> bool {
         if let ManagedObject::List(elements) = &obj.obj {
             for atomic_v in elements.iter() {
                 let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
@@ -239,6 +264,21 @@ impl Context {
             }
         }
         false
+    }
+
+    pub fn get_string_value(&self, val: Value) -> Option<String> {
+        if let Some(s) = val.as_sso() {
+            return Some(s);
+        }
+        if let Some(oid) = val.as_obj_id() {
+            let heap = self.heap.read().unwrap();
+            if let Some(Some(obj)) = heap.get(oid as usize) {
+                if let ManagedObject::String(s) = &obj.obj {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
     }
 }
 
