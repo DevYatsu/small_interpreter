@@ -92,28 +92,31 @@ impl Value {
         }
     }
 
-    pub fn as_string(&self, ctx: &Context) -> Option<String> {
-        // sso
+    pub fn with_str<R>(&self, ctx: &Context, f: impl FnOnce(&str) -> R) -> Option<R> {
         let bits = self.0;
         let tag = (bits & TAG_MASK) >> 48;
         if (3..=9).contains(&tag) {
             let len = (tag - 3) as usize;
-            let mut bytes = Vec::with_capacity(len);
+            let mut bytes = [0u8; 6];
             for i in 0..len {
-                bytes.push(((bits >> (i * 8)) & 0xFF) as u8);
+                bytes[i] = ((bits >> (i * 8)) & 0xFF) as u8;
             }
-            return Some(String::from_utf8_lossy(&bytes).to_string());
+            let s = std::str::from_utf8(&bytes[..len]).ok()?;
+            return Some(f(s));
         }
-        // other string objects
         if let Some(oid) = self.as_obj_id() {
-            let heap = ctx.heap.read().unwrap();
+            let heap = ctx.heap.objects.read().unwrap();
             if let Some(Some(obj)) = heap.get(oid as usize)
                 && let ManagedObject::String(s) = &obj.obj
             {
-                return Some(s.to_string());
+                return Some(f(s.as_ref()));
             }
         }
         None
+    }
+
+    pub fn as_string(&self, ctx: &Context) -> Option<String> {
+        self.with_str(ctx, |s| s.to_string())
     }
 
     #[inline(always)]
@@ -175,19 +178,9 @@ pub enum Instruction {
     /// Atomic increment of a global variable (expected to contain a number).
     IncrementGlobal(usize),
     /// Compare two values for equality.
-    Eq {
-        dst: usize,
-        lhs: usize,
-        rhs: usize,
-        loc: Loc,
-    },
+    Eq { dst: usize, lhs: usize, rhs: usize },
     /// Compare two values for inequality.
-    Ne {
-        dst: usize,
-        lhs: usize,
-        rhs: usize,
-        loc: Loc,
-    },
+    Ne { dst: usize, lhs: usize, rhs: usize },
     /// Less than comparison.
     Lt {
         dst: usize,
@@ -241,16 +234,9 @@ pub enum Instruction {
         src: usize,
         loc: Loc,
     },
-    /// Call a native function implemented in Rust.
-    CallNative {
-        name_id: u32,
-        args_regs: Arc<[usize]>,
-        dst: Option<usize>,
-        loc: Loc,
-    },
-    /// Call a user-defined function.
+    /// Call a function (user or native) by its name ID in the string pool.
     Call {
-        func_id: u32,
+        name_id: u32,
         args_regs: Arc<[usize]>,
         dst: Option<usize>,
         loc: Loc,

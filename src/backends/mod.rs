@@ -2,7 +2,7 @@ use crate::compiler::{Loc, Program, Value};
 use crate::error::JitError;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 pub mod interpreter;
@@ -11,95 +11,61 @@ pub trait Backend {
     fn run(&self, program: Program) -> Pin<Box<dyn Future<Output = Result<(), JitError>> + Send>>;
 }
 
-/// Represents the age of an object in the generational garbage collector.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Generation {
-    /// Newly allocated objects start here.
     Nursery,
-    /// Objects that survive at least one GC cycle are promoted to the Tenured generation.
     Tenured,
 }
 
-/// A heap-allocated object managed by the garbage collector.
 pub enum ManagedObject {
-    /// A UTF-8 string.
     String(Arc<str>),
-    /// A fixed-size list of values, where each element is an atomic 64-bit word.
     List(Box<[AtomicU64]>),
 }
 
-/// Metadata and storage for an object on the heap.
 pub struct HeapObject {
-    /// The actual object data.
     pub obj: ManagedObject,
-    /// The ID of the last GC cycle that visited this object (used for marking).
     pub last_gc_id: u32,
-    /// The generation of this object (Nursery or Tenured).
     pub generation: Generation,
 }
 
-/// The execution context shared across all threads and tasks.
-///
-/// It contains the global state, the heap, the string pool, and metadata
-/// required for synchronization and garbage collection.
+#[derive(Clone)]
+pub enum Callable {
+    User(crate::compiler::UserFunction),
+    Native(NativeFn),
+}
+
 pub struct Context {
-    /// Global variables shared by all tasks.
-    pub globals: Vec<AtomicU64>,
-    /// Interned string pool.
+    pub globals: Arc<[AtomicU64]>,
     pub string_pool: Arc<[Arc<str>]>,
-    /// The shared heap, protected by a Read-Write lock.
-    pub heap: RwLock<Vec<Option<HeapObject>>>,
-    /// List of indices in the heap that are currently free/available for reuse.
-    pub free_list: Mutex<Vec<u32>>,
-    /// List of object IDs in the Nursery generation (used for Minor GC).
-    pub nursery_ids: Mutex<Vec<u32>>,
-    /// Registered native functions mapped by their string pool ID.
-    pub native_fns: Vec<Option<NativeFn>>,
-    /// Maps string pool ID → index into `functions` for O(1) user-fn lookup.
-    pub fn_by_name_id: rustc_hash::FxHashMap<u32, u32>,
-    /// Maps string pool ID → index into `native_fns` for O(1) native-fn lookup.
-    pub native_by_name_id: rustc_hash::FxHashMap<u32, usize>,
-    /// Tracks active register sets for all running tasks (used as GC roots).
-    pub active_registers: RwLock<Vec<Arc<[AtomicU64]>>>,
-    /// Set of tenured objects that point to objects in the nursery.
-    pub remembered_set: Mutex<rustc_hash::FxHashSet<u32>>,
-    /// Monotonically increasing counter of GC cycles performed.
-    pub gc_count: std::sync::atomic::AtomicU32,
-    /// Number of allocations performed since the last garbage collection.
-    pub alloc_since_gc: std::sync::atomic::AtomicUsize,
-    /// The user-defined functions compiled into bytecode.
-    pub functions: Arc<[crate::compiler::UserFunction]>,
+    pub callables: Arc<[Option<Callable>]>,
+    pub active_registers: Mutex<Vec<Arc<[AtomicU64]>>>,
+    pub heap: Heap,
+}
+
+pub struct Heap {
+    pub objects: RwLock<Vec<Option<HeapObject>>>,
+    pub metadata: Mutex<HeapMetadata>,
+    pub gc_count: AtomicU32,
+    pub alloc_since_gc: AtomicUsize,
+}
+
+pub struct HeapMetadata {
+    pub free_list: Vec<u32>,
+    pub nursery_ids: Vec<u32>,
+    pub remembered_set: rustc_hash::FxHashSet<u32>,
 }
 
 impl Context {
-    /// Returns the native function registered under the given string pool ID, if any.
     #[inline]
-    pub fn get_native_fn(&self, name_id: u32) -> Option<NativeFn> {
-        self.native_by_name_id
-            .get(&name_id)
-            .and_then(|&idx| self.native_fns.get(idx).and_then(|f| f.clone()))
+    pub fn get_callable(&self, name_id: u32) -> Option<&Callable> {
+        unsafe { self.callables.get_unchecked(name_id as usize).as_ref() }
     }
 
-    /// Returns the user function registered under the given string pool ID, if any.
-    #[inline]
-    pub fn get_user_fn(&self, name_id: u32) -> Option<crate::compiler::UserFunction> {
-        self.fn_by_name_id
-            .get(&name_id)
-            .and_then(|&idx| self.functions.get(idx as usize).cloned())
-    }
-
-    /// Resolves a `Value` to its string pool ID without any heap allocation.
-    ///
-    /// - SSO values (tag 3–9): the string is decoded and matched against the pool.
-    /// - Heap object values: the object ID is used directly as the pool ID
-    ///   (string pool entries live at the start of the heap).
-    /// - Returns `None` if the value is not a string or not found in the pool.
     #[inline]
     pub fn value_as_pool_id(&self, val: Value) -> Option<u32> {
         let bits = val.to_bits();
         let tag = (bits & crate::compiler::TAG_MASK) >> 48;
         if (3..=9).contains(&tag) {
-            // SSO: decode bytes and scan pool (pool is small, this is fast)
             let len = (tag - 3) as usize;
             let mut bytes = [0u8; 6];
             for i in 0..len {
@@ -111,75 +77,65 @@ impl Context {
                 .position(|p| p.as_ref() == s)
                 .map(|i| i as u32)
         } else if let Some(oid) = val.as_obj_id() {
-            // Heap object: if it's within the string pool range it IS a pool entry
             if (oid as usize) < self.string_pool.len() {
-                Some(oid)
-            } else {
-                // Heap string outside pool — scan pool for a match
-                let heap = self.heap.read().unwrap();
-                if let Some(Some(obj)) = heap.get(oid as usize)
-                    && let ManagedObject::String(s) = &obj.obj
-                {
-                    return self
-                        .string_pool
-                        .iter()
-                        .position(|p| p == s)
-                        .map(|i| i as u32);
-                }
-                None
+                return Some(oid);
             }
+            let heap = self.heap.objects.read().unwrap();
+            if let Some(Some(obj)) = heap.get(oid as usize)
+                && let ManagedObject::String(s) = &obj.obj
+            {
+                return self
+                    .string_pool
+                    .iter()
+                    .position(|p| p.as_ref() == s.as_ref())
+                    .map(|i| i as u32);
+            }
+            None
         } else {
             None
         }
     }
 
     pub fn alloc(&self, obj: ManagedObject, dst: &AtomicU64) -> u32 {
+        let count = self.heap.alloc_since_gc.fetch_add(1, Ordering::Relaxed);
+        if count >= 10000
+            && self
+                .heap
+                .alloc_since_gc
+                .compare_exchange(count + 1, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
         {
-            let count = self.alloc_since_gc.fetch_add(1, Ordering::Relaxed);
-            if count >= 10000
-                && self
-                    .alloc_since_gc
-                    .compare_exchange(count + 1, 0, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                println!("DEBUG: Triggering GC...");
-                self.collect_garbage();
-            }
+            self.collect_garbage();
         }
 
-        let mut heap = self.heap.write().unwrap();
-        let id = {
-            let mut free_list = self.free_list.lock().unwrap();
-            let id = if let Some(id) = free_list.pop() {
-                heap[id as usize] = Some(HeapObject {
-                    obj,
-                    last_gc_id: 0,
-                    generation: Generation::Nursery,
-                });
-                id
-            } else {
-                let id = heap.len() as u32;
-                heap.push(Some(HeapObject {
-                    obj,
-                    last_gc_id: 0,
-                    generation: Generation::Nursery,
-                }));
-                id
-            };
-            // Root it immediately while holding the heap lock
-            dst.store(Value::object(id).to_bits(), Ordering::Relaxed);
+        let mut objects = self.heap.objects.write().unwrap();
+        let mut meta = self.heap.metadata.lock().unwrap();
+
+        let id = if let Some(id) = meta.free_list.pop() {
+            objects[id as usize] = Some(HeapObject {
+                obj,
+                last_gc_id: 0,
+                generation: Generation::Nursery,
+            });
+            id
+        } else {
+            let id = objects.len() as u32;
+            objects.push(Some(HeapObject {
+                obj,
+                last_gc_id: 0,
+                generation: Generation::Nursery,
+            }));
             id
         };
 
-        let mut nursery = self.nursery_ids.lock().unwrap();
-        nursery.push(id);
+        dst.store(Value::object(id).to_bits(), Ordering::Relaxed);
+        meta.nursery_ids.push(id);
         id
     }
 
     pub fn collect_garbage(&self) {
-        let gc_id = self.gc_count.fetch_add(1, Ordering::Relaxed) + 1;
-
-        if gc_id.is_multiple_of(5) {
+        let gc_id = self.heap.gc_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if gc_id % 5 == 0 {
             self.major_gc(gc_id);
         } else {
             self.minor_gc(gc_id);
@@ -187,13 +143,13 @@ impl Context {
     }
 
     pub fn major_gc(&self, gc_id: u32) {
-        let mut heap = self.heap.write().unwrap();
+        let mut objects = self.heap.objects.write().unwrap();
         let mut worklist = Vec::new();
 
-        self.trace_roots(&mut worklist);
+        self.trace_roots(&objects, &mut worklist);
 
         while let Some(id) = worklist.pop() {
-            if let Some(Some(obj)) = heap.get_mut(id as usize)
+            if let Some(Some(obj)) = objects.get_mut(id as usize)
                 && obj.last_gc_id != gc_id
             {
                 obj.last_gc_id = gc_id;
@@ -201,18 +157,15 @@ impl Context {
             }
         }
 
-        let mut free_list = self.free_list.lock().unwrap();
-        let mut remembered_set = self.remembered_set.lock().unwrap();
-        let mut nursery_ids = self.nursery_ids.lock().unwrap();
+        let mut meta = self.heap.metadata.lock().unwrap();
+        meta.remembered_set.clear();
+        meta.nursery_ids.clear();
 
-        remembered_set.clear();
-        nursery_ids.clear();
-
-        for i in 0..heap.len() {
-            if let Some(ref mut obj) = heap[i] {
+        for i in 0..objects.len() {
+            if let Some(ref mut obj) = objects[i] {
                 if obj.last_gc_id != gc_id {
-                    heap[i] = None;
-                    free_list.push(i as u32);
+                    objects[i] = None;
+                    meta.free_list.push(i as u32);
                 } else {
                     obj.generation = Generation::Tenured;
                 }
@@ -221,19 +174,19 @@ impl Context {
     }
 
     pub fn minor_gc(&self, gc_id: u32) {
-        let mut heap = self.heap.write().unwrap();
+        let mut objects = self.heap.objects.write().unwrap();
         let mut worklist = Vec::new();
 
-        self.trace_roots(&mut worklist);
+        self.trace_roots(&objects, &mut worklist);
         {
-            let remembered = self.remembered_set.lock().unwrap();
-            for &id in remembered.iter() {
+            let meta = self.heap.metadata.lock().unwrap();
+            for &id in meta.remembered_set.iter() {
                 worklist.push(id);
             }
         }
 
         while let Some(id) = worklist.pop() {
-            if let Some(Some(obj)) = heap.get_mut(id as usize)
+            if let Some(Some(obj)) = objects.get_mut(id as usize)
                 && obj.last_gc_id != gc_id
             {
                 obj.last_gc_id = gc_id;
@@ -241,15 +194,15 @@ impl Context {
             }
         }
 
-        let mut free_list = self.free_list.lock().unwrap();
-        let mut nursery_ids = self.nursery_ids.lock().unwrap();
+        let mut meta = self.heap.metadata.lock().unwrap();
         let mut promoted_ids = Vec::new();
 
-        for id in nursery_ids.drain(..) {
-            if let Some(Some(obj)) = heap.get_mut(id as usize) {
+        let ids: Vec<u32> = meta.nursery_ids.drain(..).collect();
+        for id in ids {
+            if let Some(Some(obj)) = objects.get_mut(id as usize) {
                 if obj.last_gc_id != gc_id {
-                    heap[id as usize] = None;
-                    free_list.push(id);
+                    objects[id as usize] = None;
+                    meta.free_list.push(id);
                 } else {
                     obj.generation = Generation::Tenured;
                     promoted_ids.push(id);
@@ -257,43 +210,37 @@ impl Context {
             }
         }
 
-        let mut remembered_set = self.remembered_set.lock().unwrap();
         let mut new_remembered = rustc_hash::FxHashSet::default();
-
-        for &id in remembered_set.iter() {
-            if let Some(Some(obj)) = heap.get(id as usize)
+        for &id in meta.remembered_set.iter() {
+            if let Some(Some(obj)) = objects.get(id as usize)
                 && obj.generation == Generation::Tenured
-                && self.check_points_to_nursery(obj, &heap)
+                && self.check_points_to_nursery(obj, &objects)
             {
                 new_remembered.insert(id);
             }
         }
 
         for id in promoted_ids {
-            if let Some(Some(obj)) = heap.get(id as usize)
-                && self.check_points_to_nursery(obj, &heap)
+            if let Some(Some(obj)) = objects.get(id as usize)
+                && self.check_points_to_nursery(obj, &objects)
             {
                 new_remembered.insert(id);
             }
         }
-
-        *remembered_set = new_remembered;
+        meta.remembered_set = new_remembered;
     }
 
-    fn trace_roots(&self, worklist: &mut Vec<u32>) {
-        // Trace string pool literals (the first N objects in the heap)
+    fn trace_roots(&self, _objects: &[Option<HeapObject>], worklist: &mut Vec<u32>) {
         for i in 0..self.string_pool.len() {
             worklist.push(i as u32);
         }
-
-        for global in &self.globals {
+        for global in self.globals.iter() {
             let val = Value::from_bits(global.load(Ordering::Relaxed));
             if let Some(id) = val.as_obj_id() {
                 worklist.push(id);
             }
         }
-
-        let active_regs = self.active_registers.read().unwrap();
+        let active_regs = self.active_registers.lock().unwrap();
         for regs in active_regs.iter() {
             for atomic_val in regs.iter() {
                 let val = Value::from_bits(atomic_val.load(Ordering::Relaxed));
@@ -330,55 +277,26 @@ impl Context {
         false
     }
 
-    fn get_string_value(&self, val: Value) -> Option<String> {
-        let bits = val.to_bits();
-        let tag = (bits & crate::compiler::TAG_MASK) >> 48;
-        if (3..=9).contains(&tag) {
-            let len = (tag - 3) as usize;
-            let mut bytes = Vec::with_capacity(len);
-            for i in 0..len {
-                bytes.push(((bits >> (i * 8)) & 0xFF) as u8);
-            }
-            return Some(String::from_utf8_lossy(&bytes).to_string());
-        }
-        if let Some(oid) = val.as_obj_id() {
-            let heap = self.heap.read().unwrap();
-            if let Some(Some(obj)) = heap.get(oid as usize)
-                && let ManagedObject::String(s) = &obj.obj
-            {
-                return Some(s.to_string());
-            }
-        }
-        None
-    }
-
     pub fn values_equal(&self, v1: Value, v2: Value) -> bool {
         let b1 = v1.to_bits();
         let b2 = v2.to_bits();
         if b1 == b2 {
             return true;
         }
-
         if let (Some(n1), Some(n2)) = (v1.as_number(), v2.as_number()) {
             return n1 == n2;
         }
 
-        // Try SSO comparison
         let tag1 = (b1 & crate::compiler::TAG_MASK) >> 48;
         let tag2 = (b2 & crate::compiler::TAG_MASK) >> 48;
-
         if (3..=9).contains(&tag1) || (3..=9).contains(&tag2) {
-            let s1 = self.get_string_value(v1);
-            let s2 = self.get_string_value(v2);
-            return match (s1, s2) {
-                (Some(s1), Some(s2)) => s1 == s2,
-                _ => false,
-            };
+            let s1 = v1.as_string(self);
+            let s2 = v2.as_string(self);
+            return s1 == s2;
         }
 
-        // Both could be heap strings
         if let (Some(id1), Some(id2)) = (v1.as_obj_id(), v2.as_obj_id()) {
-            let heap = self.heap.read().unwrap();
+            let heap = self.heap.objects.read().unwrap();
             if id1 < heap.len() as u32
                 && id2 < heap.len() as u32
                 && let (Some(o1), Some(o2)) = (&heap[id1 as usize], &heap[id2 as usize])
@@ -387,7 +305,6 @@ impl Context {
                 return s1 == s2;
             }
         }
-
         false
     }
 }

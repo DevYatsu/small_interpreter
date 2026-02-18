@@ -188,8 +188,8 @@ impl<'source> Parser<'source> {
             let rhs = self.parse_binary(prec + 1, instructions)?;
             let dst = self.alloc_reg();
             let instr = match op {
-                Token::Eq => Instruction::Eq { dst, lhs, rhs, loc },
-                Token::Ne => Instruction::Ne { dst, lhs, rhs, loc },
+                Token::Eq => Instruction::Eq { dst, lhs, rhs },
+                Token::Ne => Instruction::Ne { dst, lhs, rhs },
                 Token::Lt => Instruction::Lt { dst, lhs, rhs, loc },
                 Token::Le => Instruction::Le { dst, lhs, rhs, loc },
                 Token::Gt => Instruction::Gt { dst, lhs, rhs, loc },
@@ -275,16 +275,8 @@ impl<'source> Parser<'source> {
                     }
                     let dst = self.alloc_reg();
 
-                    // Static dispatch: known user function
-                    if let Some(&func_id) = self.function_map.get(id) {
-                        instructions.push(Instruction::Call {
-                            func_id,
-                            args_regs: Arc::from(args),
-                            dst: Some(dst),
-                            loc: self.loc(),
-                        });
-                    } else if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(id) {
-                        // Dynamic dispatch: callee is stored in a variable
+                    // Dynamic dispatch: callee is stored in a variable
+                    if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(id) {
                         let callee_reg = if is_global {
                             let r = self.alloc_reg();
                             instructions.push(Instruction::LoadGlobal {
@@ -303,9 +295,9 @@ impl<'source> Parser<'source> {
                             loc: self.loc(),
                         });
                     } else {
-                        // Native or unknown — resolved at runtime by name
+                        // Unified Call: user or native resolved at runtime by name ID
                         let name_id = self.intern(id);
-                        instructions.push(Instruction::CallNative {
+                        instructions.push(Instruction::Call {
                             name_id,
                             args_regs: Arc::from(args),
                             dst: Some(dst),
@@ -509,14 +501,7 @@ impl<'source> Parser<'source> {
             }
         }
 
-        if let Some(&func_id) = self.function_map.get(name) {
-            instructions.push(Instruction::Call {
-                func_id,
-                args_regs: Arc::from(args),
-                dst: None,
-                loc,
-            });
-        } else if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(name) {
+        if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(name) {
             // Dynamic dispatch: callee is stored in a variable
             let callee_reg = if is_global {
                 let r = self.alloc_reg();
@@ -536,8 +521,9 @@ impl<'source> Parser<'source> {
                 loc,
             });
         } else {
+            // Unified Call: user or native resolved at runtime by name ID
             let name_id = self.intern(name);
-            instructions.push(Instruction::CallNative {
+            instructions.push(Instruction::Call {
                 name_id,
                 args_regs: Arc::from(args),
                 dst: None,
