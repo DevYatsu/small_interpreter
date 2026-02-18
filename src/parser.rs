@@ -495,6 +495,57 @@ impl<'source> Parser<'source> {
             return Err(JitError::Parsing("Expected ':'".into(), self.line, 0));
         }
 
+        // Optimization: detect x: x + 1 or x: 1 + x
+        if indices.is_empty() {
+            let mut lex = self.lexer.clone();
+            let t1 = lex.next();
+            let t2 = lex.next();
+            let t3 = lex.next();
+            let t4 = lex.next();
+
+            let is_inc = match (&t1, &t2, &t3) {
+                (
+                    Some(Ok(Token::Identifier(id))),
+                    Some(Ok(Token::Plus)),
+                    Some(Ok(Token::Number(n))),
+                ) if *id == name && *n == 1.0 => true,
+                (
+                    Some(Ok(Token::Number(n))),
+                    Some(Ok(Token::Plus)),
+                    Some(Ok(Token::Identifier(id))),
+                ) if *id == name && *n == 1.0 => true,
+                _ => false,
+            };
+
+            if is_inc {
+                // Ensure it's not part of a larger expression like x: x + 1 * 2
+                // We check if the next token has higher or equal precedence than Plus,
+                // but since we only care if the expression ENDS there:
+                let is_isolated = match t4 {
+                    Some(Ok(Token::Newline))
+                    | Some(Ok(Token::RBrace))
+                    | Some(Ok(Token::Comma))
+                    | Some(Ok(Token::RParen))
+                    | None => true,
+                    _ => false,
+                };
+
+                if is_isolated {
+                    // Consume tokens
+                    let _ = self.next_token(); // t1
+                    let _ = self.next_token(); // t2
+                    let _ = self.next_token(); // t3
+
+                    if info.is_global {
+                        instructions.push(Instruction::IncrementGlobal(info.idx));
+                    } else {
+                        instructions.push(Instruction::Increment(info.idx));
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         let src_reg = self.parse_expr(instructions)?;
 
         if indices.is_empty() {
@@ -767,7 +818,7 @@ impl<'source> Parser<'source> {
         let old_is_in_spawn = self.is_in_spawn;
 
         let old_is_in_function = self.is_in_function;
-        self.var_map.clear();
+        self.var_map.retain(|_, v| v.is_global);
         self.next_reg = 0;
         self.is_in_spawn = false;
         self.is_in_function = true;

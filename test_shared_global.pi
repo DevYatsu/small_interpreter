@@ -1,0 +1,28 @@
+el g: 0
+
+fn task(id) {
+    el i: 0
+    while i < 1000 {
+        g: g + 1
+        i: i + 1
+    }
+}
+
+le num: 10
+print("Starting", num, "tasks to increment global g...")
+el t: 0
+while t < num {
+    spawn {
+        task(t)
+    }
+    t: t + 1
+}
+
+// Wait a bit
+sleep(500)
+print("Final value of g is", g)
+if g == 10000 {
+    print("SUCCESS")
+} else {
+    print("FAILURE: expected 10000, got", g)
+}

@@ -13,14 +13,12 @@ fn stress(n) {
 }
 
 le num_tasks: 16
-le count: 1000
+le count: 10_000
 
 print("Spawning", num_tasks, "tasks, each doing", count, "allocations...")
 
 el t: 0
 while t < num_tasks {
-    spawn {
-        stress(count)
-    }
+    stress(count)
     t: t + 1
 }

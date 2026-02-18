@@ -116,26 +116,26 @@ pub async fn execute_bytecode(
     let mut pc = 0;
     let mut instr_count: u32 = 0;
     while pc < instructions.len() {
-        let instr = &instructions[pc];
+        let instr = unsafe { instructions.get_unchecked(pc) };
         instr_count = instr_count.wrapping_add(1);
 
         match instr {
             Instruction::LoadLiteral { dst, val } => {
-                registers[*dst].store(val.to_bits(), Ordering::Relaxed);
+                unsafe { registers.get_unchecked(*dst).store(val.to_bits(), Ordering::Relaxed); }
                 pc += 1;
             }
             Instruction::Move { dst, src } => {
-                let bits = registers[*src].load(Ordering::Relaxed);
-                registers[*dst].store(bits, Ordering::Relaxed);
+                let bits = unsafe { registers.get_unchecked(*src).load(Ordering::Relaxed) };
+                unsafe { registers.get_unchecked(*dst).store(bits, Ordering::Relaxed); }
                 pc += 1;
             }
             Instruction::LoadGlobal { dst, global } => {
                 let bits = unsafe { ctx.globals.get_unchecked(*global).load(Ordering::Relaxed) };
-                registers[*dst].store(bits, Ordering::Relaxed);
+                unsafe { registers.get_unchecked(*dst).store(bits, Ordering::Relaxed); }
                 pc += 1;
             }
             Instruction::StoreGlobal { global, src } => {
-                let bits = registers[*src].load(Ordering::Relaxed);
+                let bits = unsafe { registers.get_unchecked(*src).load(Ordering::Relaxed) };
                 unsafe {
                     ctx.globals
                         .get_unchecked(*global)
@@ -156,12 +156,12 @@ pub async fn execute_bytecode(
                 if let Some(native_fn) = native_fn {
                     let mut args = Vec::with_capacity(args_regs.len());
                     for &reg in args_regs.iter() {
-                        args.push(Value::from_bits(registers[reg].load(Ordering::Relaxed)));
+                        args.push(Value::from_bits(unsafe { registers.get_unchecked(reg).load(Ordering::Relaxed) }));
                     }
 
                     let res = native_fn(ctx.clone(), args, *loc).await?;
                     if let Some(dst_reg) = dst {
-                        registers[*dst_reg].store(res.to_bits(), Ordering::Relaxed);
+                        unsafe { registers.get_unchecked(*dst_reg).store(res.to_bits(), Ordering::Relaxed); }
                     }
                 } else {
                     let name = &ctx.string_pool[*name_id as usize];
@@ -196,7 +196,7 @@ pub async fn execute_bytecode(
                     f_regs_vec.push(AtomicU64::new(0));
                 }
                 for (i, &reg) in args_regs.iter().enumerate() {
-                    let bits = registers[reg].load(Ordering::Relaxed);
+                    let bits = unsafe { registers.get_unchecked(reg).load(Ordering::Relaxed) };
                     f_regs_vec[i].store(bits, Ordering::Relaxed);
                 }
                 let f_regs: Arc<[AtomicU64]> = Arc::from(f_regs_vec);
@@ -206,13 +206,13 @@ pub async fn execute_bytecode(
                         .await?;
 
                 if let Some(dst_reg) = dst {
-                    registers[*dst_reg].store(res.to_bits(), Ordering::Relaxed);
+                    unsafe { registers.get_unchecked(*dst_reg).store(res.to_bits(), Ordering::Relaxed); }
                 }
                 pc += 1;
             }
             Instruction::Return(val_reg) => {
                 let val = if let Some(reg) = val_reg {
-                    Value::from_bits(registers[*reg].load(Ordering::Relaxed))
+                    Value::from_bits(unsafe { registers.get_unchecked(*reg).load(Ordering::Relaxed) })
                 } else {
                     Value::from_bits(0)
                 };
@@ -220,7 +220,7 @@ pub async fn execute_bytecode(
             }
             Instruction::Jump(target) => pc = *target,
             Instruction::JumpIfFalse { cond, target } => {
-                let val = Value::from_bits(registers[*cond].load(Ordering::Relaxed));
+                let val = Value::from_bits(unsafe { registers.get_unchecked(*cond).load(Ordering::Relaxed) });
                 if let Some(false) = val.as_bool() {
                     pc = *target;
                 } else {
@@ -228,16 +228,25 @@ pub async fn execute_bytecode(
                 }
             }
             Instruction::Add { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
-                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::number(lv + rv).to_bits(), Ordering::Relaxed);
+                const QNAN: u64 = 0x7ff0000000000000;
+                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
+                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
+                
+                if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
+                    let res = f64::from_bits(l_bits) + f64::from_bits(r_bits);
+                    unsafe { registers.get_unchecked(*dst).store(Value::number(res).to_bits(), Ordering::Relaxed); }
                 } else {
-                    return Err(JitError::Runtime(
-                        "Math error: expected numbers".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
+                    let l = Value::from_bits(l_bits);
+                    let r = Value::from_bits(r_bits);
+                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                        unsafe { registers.get_unchecked(*dst).store(Value::number(lv + rv).to_bits(), Ordering::Relaxed); }
+                    } else {
+                        return Err(JitError::Runtime(
+                            "Math error: expected numbers".into(),
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    }
                 }
                 pc += 1;
             }
@@ -284,11 +293,12 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Increment(reg) => {
-                let _ =
-                    registers[*reg].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+                let _ = unsafe {
+                    registers.get_unchecked(*reg).fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
                         let val = Value::from_bits(bits);
                         val.as_number().map(|n| Value::number(n + 1.0).to_bits())
-                    });
+                    })
+                };
                 pc += 1;
             }
             Instruction::IncrementGlobal(global) => {
@@ -310,11 +320,8 @@ pub async fn execute_bytecode(
                 rhs,
                 loc: _,
             } => {
-                let l = registers[*lhs].load(Ordering::Relaxed);
-                let r = registers[*rhs].load(Ordering::Relaxed);
-                // Simple bitwise equality for EQ/NE since our tags and values are canonical
-                // (except for multiple NaN representations in f64, but we mostly care about our tagged values)
-                // Actually, let's be more robust for numbers.
+                let l = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
+                let r = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
                 let lv = Value::from_bits(l);
                 let rv = Value::from_bits(r);
                 let eq = if let (Some(ln), Some(rn)) = (lv.as_number(), rv.as_number()) {
@@ -322,7 +329,7 @@ pub async fn execute_bytecode(
                 } else {
                     l == r
                 };
-                registers[*dst].store(Value::bool(eq).to_bits(), Ordering::Relaxed);
+                unsafe { registers.get_unchecked(*dst).store(Value::bool(eq).to_bits(), Ordering::Relaxed); }
                 pc += 1;
             }
             Instruction::Ne {
@@ -405,7 +412,7 @@ pub async fn execute_bytecode(
                     elements.push(AtomicU64::new(0));
                 }
                 let oid = ctx.alloc(ManagedObject::List(elements.into_boxed_slice()));
-                registers[*dst].store(Value::object(oid).to_bits(), Ordering::Relaxed);
+                unsafe { registers.get_unchecked(*dst).store(Value::object(oid).to_bits(), Ordering::Relaxed); }
                 pc += 1;
             }
             Instruction::ListGet {
@@ -414,8 +421,8 @@ pub async fn execute_bytecode(
                 index_reg,
                 loc,
             } => {
-                let list_val = Value::from_bits(registers[*list].load(Ordering::Relaxed));
-                let index_val = Value::from_bits(registers[*index_reg].load(Ordering::Relaxed));
+                let list_val = Value::from_bits(unsafe { registers.get_unchecked(*list).load(Ordering::Relaxed) });
+                let index_val = Value::from_bits(unsafe { registers.get_unchecked(*index_reg).load(Ordering::Relaxed) });
                 let index = index_val.as_number().map(|n| n as usize).ok_or_else(|| {
                     JitError::Runtime(
                         "List index must be a number".into(),
@@ -433,7 +440,7 @@ pub async fn execute_bytecode(
                     {
                         if let Some(atomic_val) = elements.get(index) {
                             let val_bits = atomic_val.load(Ordering::Relaxed);
-                            registers[*dst].store(val_bits, Ordering::Relaxed);
+                            unsafe { registers.get_unchecked(*dst).store(val_bits, Ordering::Relaxed); }
                         } else {
                             return Err(JitError::Runtime(
                                 format!(
@@ -467,9 +474,9 @@ pub async fn execute_bytecode(
                 src,
                 loc,
             } => {
-                let list_val = Value::from_bits(registers[*list].load(Ordering::Relaxed));
-                let index_val = Value::from_bits(registers[*index_reg].load(Ordering::Relaxed));
-                let src_bits = registers[*src].load(Ordering::Relaxed);
+                let list_val = Value::from_bits(unsafe { registers.get_unchecked(*list).load(Ordering::Relaxed) });
+                let index_val = Value::from_bits(unsafe { registers.get_unchecked(*index_reg).load(Ordering::Relaxed) });
+                let src_bits = unsafe { registers.get_unchecked(*src).load(Ordering::Relaxed) };
                 let index = index_val.as_number().map(|n| n as usize).ok_or_else(|| {
                     JitError::Runtime(
                         "List index must be a number".into(),

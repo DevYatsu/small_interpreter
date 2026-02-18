@@ -60,10 +60,10 @@ impl Context {
             }
         }
 
+        let mut heap = self.heap.write().unwrap();
         let id = {
             let mut free_list = self.free_list.lock().unwrap();
             if let Some(id) = free_list.pop() {
-                let mut heap = self.heap.write().unwrap();
                 heap[id as usize] = Some(HeapObject {
                     obj,
                     last_gc_id: 0,
@@ -71,7 +71,6 @@ impl Context {
                 });
                 id
             } else {
-                let mut heap = self.heap.write().unwrap();
                 let id = heap.len() as u32;
                 heap.push(Some(HeapObject {
                     obj,
