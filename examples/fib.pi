@@ -1,0 +1,29 @@
+let TARGET: 28
+let REPEAT: 5
+let ANSWER: 317_811
+
+fn fib(n) {
+    if n < 2 {
+        return n
+    } else {
+        return fib(n - 1) + fib(n - 2)
+    }
+}
+
+print("Running Fibonacci(" + str(TARGET) + ") x " + str(REPEAT) + " times...")
+print("Ready... Go!")
+
+mut result: 0
+let now: timestamp()
+
+for n in 0 ..REPEAT {
+    result: fib(TARGET)
+}
+
+print("Finished. Run time = " + str(now.elapsed) + " seconds.")
+
+print("Fibonacci number #" + str(TARGET) + " = " + str(result))
+
+if result != ANSWER {
+    print("The answer is WRONG! Should be " + str(ANSWER) + "!")
+}

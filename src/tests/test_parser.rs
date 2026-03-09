@@ -11,8 +11,7 @@ mod tests {
     // Helpers
 
     fn compile(input: &str) -> Result<crate::compiler::Program, JitError> {
-        let mut parser = Parser::new(input);
-        parser.compile()
+        Parser::new(input)?.compile()
     }
 
     fn instructions(src: &str) -> Vec<Instruction> {

@@ -84,6 +84,9 @@ pub enum Token<'source> {
     /// 'return' keyword.
     #[token("return")]
     Return,
+    /// 'continue' keyword.
+    #[token("continue")]
+    Continue,
     /// 'if' keyword.
     #[token("if")]
     If,
@@ -165,6 +168,9 @@ pub enum Token<'source> {
     /// '>=' operator.
     #[token(">=")]
     Ge,
+    /// '!' operator.
+    #[token("!")]
+    Not,
     /// Boolean literals.
     #[token("false", |_| false)]
     #[token("true", |_| true)]
@@ -187,6 +193,13 @@ pub enum Token<'source> {
     /// Identifier names.
     #[regex(r"[[:alpha:]_][[:alpha:]0-9_]*", |lex| lex.slice())]
     Identifier(&'source str),
+
+    /// Template literals enclosed in backticks.
+    #[regex(r#"`([^`\\]|\\.)*`"#, |lex| {
+        let s = lex.slice();
+        &s[1..s.len()-1]
+    })]
+    Template(&'source str),
 
     /// Double-slash line comments.
     #[regex(r"//[^\n]*", allow_greedy = true)]
@@ -224,13 +237,14 @@ mod tests {
 
     #[test]
     fn test_lexer_keywords() {
-        let input = "mut let fn return if else spawn for while in ..";
+        let input = "mut let fn return continue if else spawn for while in ..";
         let mut lexer = Token::lexer(input);
 
         assert_eq!(lexer.next(), Some(Ok(Token::MutableVar)));
         assert_eq!(lexer.next(), Some(Ok(Token::ImmutableVar)));
         assert_eq!(lexer.next(), Some(Ok(Token::Fn)));
         assert_eq!(lexer.next(), Some(Ok(Token::Return)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Continue)));
         assert_eq!(lexer.next(), Some(Ok(Token::If)));
         assert_eq!(lexer.next(), Some(Ok(Token::Else)));
         assert_eq!(lexer.next(), Some(Ok(Token::Spawn)));
@@ -280,6 +294,7 @@ mod tests {
         assert_eq!(lexer.next(), Some(Ok(Token::Le)));
         assert_eq!(lexer.next(), Some(Ok(Token::Gt)));
         assert_eq!(lexer.next(), Some(Ok(Token::Ge)));
+        assert_eq!(lexer.next(), Some(Ok(Token::Not)));
         assert_eq!(lexer.next(), None);
     }
 

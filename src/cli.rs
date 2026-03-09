@@ -5,8 +5,6 @@ use crate::parser;
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 /// Format .pi files.
@@ -66,7 +64,7 @@ pub async fn run_file(file_path: &str) -> Result<(), JitError> {
         JitError::runtime(format!("Failed to read file '{}': {}", file_path, e), 0, 0)
     })?;
 
-    let program = match parser::Parser::new(&content).compile() {
+    let program = match parser::Parser::new(&content)?.compile() {
         Ok(prog) => prog,
         Err(e) => {
             print_error(&content, &e);
@@ -163,7 +161,7 @@ pub async fn run_repl() -> Result<(), JitError> {
 }
 
 async fn eval_and_print(source: String) {
-    let program = match parser::Parser::new(&source).compile() {
+    let program = match parser::Parser::new(&source).and_then(|p| p.compile()) {
         Ok(prog) => prog,
         Err(e) => {
             print_error(&source, &e);

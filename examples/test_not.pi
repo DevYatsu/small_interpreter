@@ -1,0 +1,21 @@
+let x: true
+if !x {
+    print("Error: !true is false")
+} else {
+    print("Success: !true is false")
+}
+
+let y: false
+if !y {
+    print("Success: !false is true")
+} else {
+    print("Error: !false is true")
+}
+
+let a: true
+let b: false
+if !!a {
+    print("Success: !!true is true")
+} else {
+    print("Error: !!true is true")
+}

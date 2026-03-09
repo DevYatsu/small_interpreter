@@ -1,0 +1,20 @@
+fn assert_not(val, expected) {
+    let res: !val
+    if res == expected {
+        print("Success: !" + str(val) + " is " + str(expected))
+    } else {
+        print("Error: !" + str(val) + " expected " + str(expected) + " but got " + str(res))
+    }
+}
+
+assert_not(true, false)
+assert_not(false, true)
+assert_not(0, true)
+assert_not(1, false)
+assert_not(-5.5, false)
+
+// Currently objects/strings are all truthy
+assert_not("hi", false)
+assert_not("", false)
+assert_not([], false)
+assert_not({}, false)

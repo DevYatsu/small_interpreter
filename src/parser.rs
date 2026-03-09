@@ -20,9 +20,15 @@ struct TokenData<'source> {
     loc: Loc,
 }
 
+#[derive(Clone, Copy)]
 enum Accessor {
     Index(usize),
     Field(u32),
+}
+
+enum TemplatePart<'source> {
+    Literal(&'source str),
+    Expr(&'source str),
 }
 
 /// The Parser transforms source code into a compiled Program (bytecode).
@@ -49,12 +55,13 @@ pub struct Parser<'source> {
     is_in_function: bool,
     captures_stack: Vec<FxHashSet<usize>>,
     spawn_start_regs: Vec<usize>,
+    loop_continues: Vec<Vec<usize>>,
 }
 
 impl<'source> Parser<'source> {
-    pub fn new(input: &'source str) -> Self {
-        let tokens = Self::lex_all(input).unwrap_or_default();
-        Self {
+    pub fn new(input: &'source str) -> Result<Self, JitError> {
+        let tokens = Self::lex_all(input)?;
+        Ok(Self {
             tokens,
             pos: 0,
             globals: FxHashMap::default(),
@@ -67,8 +74,9 @@ impl<'source> Parser<'source> {
             is_in_function: false,
             captures_stack: Vec::new(),
             spawn_start_regs: Vec::new(),
+            loop_continues: Vec::new(),
             functions: Vec::with_capacity(16),
-        }
+        })
     }
 
     fn lex_all(input: &'source str) -> Result<Vec<TokenData<'source>>, JitError> {
@@ -221,12 +229,9 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
         let mut lhs = self.parse_primary(instructions)?;
-        loop {
-            let op = match self.peek() {
-                Some(t) => t,
-                _ => break,
-            };
+        while let Some(op) = self.peek() {
             let prec = match op {
+                Token::Range => 0,
                 Token::Eq | Token::Ne => 1,
                 Token::Lt | Token::Le | Token::Gt | Token::Ge => 2,
                 Token::Plus | Token::Minus => 3,
@@ -241,6 +246,13 @@ impl<'source> Parser<'source> {
             let rhs = self.parse_binary(prec + 1, instructions)?;
             let dst = self.alloc_reg();
             let instr = match op {
+                Token::Range => Instruction::Range {
+                    dst,
+                    start: lhs,
+                    end: rhs,
+                    step: None,
+                    loc,
+                },
                 Token::Eq => Instruction::Eq { dst, lhs, rhs },
                 Token::Ne => Instruction::Ne { dst, lhs, rhs },
                 Token::Lt => Instruction::Lt { dst, lhs, rhs, loc },
@@ -292,6 +304,7 @@ impl<'source> Parser<'source> {
                 instructions.push(Instruction::LoadLiteral { dst: r, val });
                 Ok(r)
             }
+            Token::Template(s) => self.parse_template_literal(s, instructions),
             Token::LBracket => self.parse_list_literal(instructions),
             Token::LBrace => self.parse_object_literal(instructions),
             Token::Identifier(id) => {
@@ -327,6 +340,16 @@ impl<'source> Parser<'source> {
                     instructions.push(Instruction::LoadLiteral { dst: r, val });
                     Ok(r)
                 }
+            }
+            Token::Not => {
+                let inner = self.parse_primary(instructions)?;
+                let dst = self.alloc_reg();
+                instructions.push(Instruction::Not {
+                    dst,
+                    src: inner,
+                    loc,
+                });
+                Ok(dst)
             }
             _ => Err(JitError::parsing(
                 format!("Expected expression, found {:?}", token),
@@ -519,10 +542,7 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Option<Result<(), JitError>> {
         loop {
-            let token = match self.peek() {
-                Some(t) => t,
-                None => return None,
-            };
+            let token = self.peek()?;
 
             match token {
                 Token::Newline => {
@@ -547,6 +567,20 @@ impl<'source> Parser<'source> {
                     self.advance().ok();
                     return Some(self.parse_return_stmt(instructions));
                 }
+                Token::Continue => {
+                    self.advance().ok();
+                    if let Some(list) = self.loop_continues.last_mut() {
+                        list.push(instructions.len());
+                        instructions.push(Instruction::Jump(0));
+                    } else {
+                        return Some(Err(JitError::parsing(
+                            "continue outside of loop".to_string(),
+                            self.loc().line as usize,
+                            self.loc().col as usize,
+                        )));
+                    }
+                    return Some(Ok(()));
+                }
                 Token::Spawn => {
                     self.advance().ok();
                     return Some(self.parse_spawn_stmt(instructions));
@@ -555,6 +589,11 @@ impl<'source> Parser<'source> {
                     if self.is_assignment() {
                         self.advance().ok();
                         return Some(self.parse_assignment(id, instructions));
+                    } else if matches!(
+                        self.peek_n(1),
+                        Some(Token::Dot) | Some(Token::LBracket) | Some(Token::LParen)
+                    ) {
+                        return Some(self.parse_expr(instructions).map(|_| ()));
                     } else {
                         self.advance().ok();
                         return Some(self.parse_call_stmt(id, instructions));
@@ -771,9 +810,9 @@ impl<'source> Parser<'source> {
             }
         } else {
             let mut current = self.load_var(info, instructions);
-            for i in 0..accessors.len() - 1 {
+            for item in accessors.iter().take(accessors.len() - 1) {
                 let dst = self.alloc_reg();
-                match accessors[i] {
+                match *item {
                     Accessor::Index(index_reg) => instructions.push(Instruction::ListGet {
                         dst,
                         list: current,
@@ -892,6 +931,7 @@ impl<'source> Parser<'source> {
 
     fn parse_while_loop(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
         let start = instructions.len();
+        self.loop_continues.push(Vec::new());
         let cond = self.parse_expr(instructions)?;
         let jump_idx = instructions.len();
         instructions.push(Instruction::Jump(0));
@@ -901,6 +941,9 @@ impl<'source> Parser<'source> {
             cond,
             target: instructions.len(),
         };
+        for continue_idx in self.loop_continues.pop().unwrap() {
+            instructions[continue_idx] = Instruction::Jump(start);
+        }
         Ok(())
     }
 
@@ -918,9 +961,18 @@ impl<'source> Parser<'source> {
             }
         };
         self.expect(Token::In)?;
-        let start_val = self.parse_expr(instructions)?;
-        self.expect(Token::Range)?;
-        let end_val = self.parse_expr(instructions)?;
+        let iter_val = self.parse_expr(instructions)?;
+
+        let start_reg = self.alloc_reg();
+        let end_reg = self.alloc_reg();
+        let step_reg = self.alloc_reg();
+
+        instructions.push(Instruction::RangeInfo {
+            range: iter_val,
+            start_dst: start_reg,
+            end_dst: end_reg,
+            step_dst: step_reg,
+        });
 
         let var_idx = self.alloc_reg();
         self.locals.insert(
@@ -932,24 +984,42 @@ impl<'source> Parser<'source> {
                 first_line: self.loc().line as usize,
             },
         );
+
         instructions.push(Instruction::Move {
             dst: var_idx,
-            src: start_val,
+            src: start_reg,
         });
 
         let loop_start = instructions.len();
         let cond = self.alloc_reg();
+
+        // For simplicity, we assume step > 0 logic for the loop condition (var < end).
+        // (A more thorough implementation might check the sign of step)
         instructions.push(Instruction::Lt {
             dst: cond,
             lhs: var_idx,
-            rhs: end_val,
+            rhs: end_reg,
             loc,
         });
+
         let jump_idx = instructions.len();
         instructions.push(Instruction::Jump(0));
 
+        self.loop_continues.push(Vec::new());
         self.parse_block(instructions)?;
-        instructions.push(Instruction::Increment(var_idx));
+
+        let continue_target = instructions.len();
+        for continue_idx in self.loop_continues.pop().unwrap() {
+            instructions[continue_idx] = Instruction::Jump(continue_target);
+        }
+
+        instructions.push(Instruction::Add {
+            dst: var_idx,
+            lhs: var_idx,
+            rhs: step_reg,
+            loc,
+        });
+
         instructions.push(Instruction::Jump(loop_start));
         instructions[jump_idx] = Instruction::JumpIfFalse {
             cond,
@@ -1100,6 +1170,113 @@ impl<'source> Parser<'source> {
             }
         }
     }
+
+    fn parse_template_literal(
+        &mut self,
+        s: &'source str,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<usize, JitError> {
+        let mut parts = Vec::new();
+        let mut last = 0;
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+                if i > last {
+                    parts.push(TemplatePart::Literal(&s[last..i]));
+                }
+                let mut depth = 1;
+                let start = i + 2;
+                i += 2;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == b'{' {
+                        depth += 1;
+                    } else if bytes[i] == b'}' {
+                        depth -= 1;
+                    }
+                    i += 1;
+                }
+                if depth == 0 {
+                    parts.push(TemplatePart::Expr(&s[start..i - 1]));
+                }
+                last = i;
+            } else {
+                i += 1;
+            }
+        }
+        if last < s.len() {
+            parts.push(TemplatePart::Literal(&s[last..]));
+        }
+
+        if parts.is_empty() {
+            let r = self.alloc_reg();
+            instructions.push(Instruction::LoadLiteral {
+                dst: r,
+                val: Value::sso("").unwrap(),
+            });
+            return Ok(r);
+        }
+
+        let mut current_res = None;
+        for part in parts {
+            let part_reg = match part {
+                TemplatePart::Literal(lit) => {
+                    let unescaped = unescape_string(lit);
+                    let val = Value::sso(&unescaped)
+                        .unwrap_or_else(|| Value::object(self.intern(&unescaped)));
+                    let r = self.alloc_reg();
+                    instructions.push(Instruction::LoadLiteral { dst: r, val });
+                    r
+                }
+                TemplatePart::Expr(expr_src) => {
+                    let reg = self.parse_sub_expr(expr_src, instructions)?;
+                    let str_id = self.intern("str");
+                    let dst = self.alloc_reg();
+                    instructions.push(Instruction::Call {
+                        name_id: str_id,
+                        args_regs: Arc::from(vec![reg]),
+                        dst: Some(dst),
+                        loc: self.loc(),
+                    });
+                    dst
+                }
+            };
+
+            if let Some(prev) = current_res {
+                let next = self.alloc_reg();
+                instructions.push(Instruction::Add {
+                    dst: next,
+                    lhs: prev,
+                    rhs: part_reg,
+                    loc: self.loc(),
+                });
+                current_res = Some(next);
+            } else {
+                current_res = Some(part_reg);
+            }
+        }
+
+        Ok(current_res.unwrap())
+    }
+
+    fn parse_sub_expr(
+        &mut self,
+        src: &'source str,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<usize, JitError> {
+        let old_tokens = std::mem::take(&mut self.tokens);
+        let old_pos = self.pos;
+
+        self.tokens = Self::lex_all(src)?;
+        self.pos = 0;
+
+        let res = self.parse_expr(instructions);
+
+        self.tokens = old_tokens;
+        self.pos = old_pos;
+
+        res
+    }
 }
 
 fn unescape_string(s: &str) -> String {
@@ -1120,10 +1297,10 @@ fn unescape_string(s: &str) -> String {
                             hex.push(h);
                         }
                     }
-                    if let Ok(n) = u32::from_str_radix(&hex, 16) {
-                        if let Some(uc) = std::char::from_u32(n) {
-                            res.push(uc);
-                        }
+                    if let Ok(n) = u32::from_str_radix(&hex, 16)
+                        && let Some(uc) = std::char::from_u32(n)
+                    {
+                        res.push(uc);
                     }
                 }
                 Some(other) => {
@@ -1146,7 +1323,7 @@ mod tests {
     #[test]
     fn test_parse_simple_assignment() {
         let input = "let x: 10";
-        let parser = Parser::new(input);
+        let parser = Parser::new(input).unwrap();
         let program = parser.compile().unwrap();
 
         assert_eq!(program.globals_count, 1);
@@ -1167,7 +1344,7 @@ mod tests {
     #[test]
     fn test_parse_arithmetic() {
         let input = "let x: 1 + 2 * 3";
-        let parser = Parser::new(input);
+        let parser = Parser::new(input).unwrap();
         let program = parser.compile().unwrap();
 
         // 1. Literal 1 -> r0
@@ -1196,7 +1373,7 @@ mod tests {
     #[test]
     fn test_parse_if_statement() {
         let input = "mut x: 10\nif x > 0 {\n  x: 20\n}";
-        let parser = Parser::new(input);
+        let parser = Parser::new(input).unwrap();
         let program = parser.compile().unwrap();
 
         // 1. LoadLiteral(r0, 10)
@@ -1221,7 +1398,7 @@ mod tests {
     #[test]
     fn test_parse_function_declaration() {
         let input = "fn add(a, b) {\n  return a + b\n}";
-        let parser = Parser::new(input);
+        let parser = Parser::new(input).unwrap();
         let program = parser.compile().unwrap();
 
         assert_eq!(program.functions.len(), 1);
@@ -1240,7 +1417,7 @@ mod tests {
     #[test]
     fn test_parse_list_and_object() {
         let input = "let l: [1, 2, 3]\nlet o: {a: 1, b: 2}";
-        let parser = Parser::new(input);
+        let parser = Parser::new(input).unwrap();
         let program = parser.compile().unwrap();
 
         assert_eq!(program.globals_count, 2);
@@ -1260,7 +1437,7 @@ mod tests {
     #[test]
     fn test_parse_error_unknown_variable() {
         let input = "x: 10";
-        let parser = Parser::new(input);
+        let parser = Parser::new(input).unwrap();
         let result = parser.compile();
         assert!(result.is_err());
         // Should be JitError::unknown_variable

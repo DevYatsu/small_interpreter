@@ -104,8 +104,8 @@ impl Value {
         if (3..=9).contains(&tag) {
             let len = (tag - 3) as usize;
             let mut bytes = [0u8; 6];
-            for i in 0..len {
-                bytes[i] = ((bits >> (i * 8)) & 0xFF) as u8;
+            for (i, byte) in bytes.iter_mut().enumerate().take(len) {
+                *byte = ((bits >> (i * 8)) & 0xFF) as u8;
             }
             let s = std::str::from_utf8(&bytes[..len]).ok()?;
             return Some(f(s));
@@ -123,6 +123,19 @@ impl Value {
 
     pub fn as_string(&self, ctx: &Context) -> Option<String> {
         self.with_str(ctx, |s| s.to_string())
+    }
+
+    #[inline(always)]
+    pub fn is_truthy(self) -> bool {
+        if let Some(b) = self.as_bool() {
+            b
+        } else if let Some(n) = self.as_number() {
+            n != 0.0 && !n.is_nan()
+        } else {
+            // Objects and SSO strings are truthy.
+            // We assume 0 is falsy (default register value).
+            self.0 != 0
+        }
     }
 
     #[inline(always)]
@@ -215,6 +228,8 @@ pub enum Instruction {
         rhs: usize,
         loc: Loc,
     },
+    /// Logical NOT of a value.
+    Not { dst: usize, src: usize, loc: Loc },
     /// Spawn a new concurrent task.
     Spawn {
         /// The instructions for the new task.
@@ -270,6 +285,21 @@ pub enum Instruction {
         args_regs: Arc<[usize]>,
         dst: Option<usize>,
         loc: Loc,
+    },
+    /// Create a range object on the heap.
+    Range {
+        dst: usize,
+        start: usize,
+        end: usize,
+        step: Option<usize>,
+        loc: Loc,
+    },
+    /// Extract start, end, and step from a range object.
+    RangeInfo {
+        range: usize,
+        start_dst: usize,
+        end_dst: usize,
+        step_dst: usize,
     },
     /// Return from the current function with an optional value.
     Return(Option<usize>),

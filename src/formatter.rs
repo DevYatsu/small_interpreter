@@ -57,6 +57,7 @@ pub fn format_source(source: &str) -> Result<String, JitError> {
                 | Token::RParen
                 | Token::LBracket
                 | Token::RBracket
+                | Token::Not
                 | Token::Dot => {}
                 _ => output.push(' '),
             }
@@ -106,13 +107,17 @@ pub fn format_source(source: &str) -> Result<String, JitError> {
                 output.push(' ');
                 need_space = false;
             }
-            Token::Identifier(s) | Token::String(s) => {
+            Token::Identifier(s) | Token::String(s) | Token::Template(s) => {
                 if matches!(token, Token::String(_)) {
                     output.push('"');
+                } else if matches!(token, Token::Template(_)) {
+                    output.push('`');
                 }
                 output.push_str(s);
                 if matches!(token, Token::String(_)) {
                     output.push('"');
+                } else if matches!(token, Token::Template(_)) {
+                    output.push('`');
                 }
                 need_space = true;
             }
@@ -124,6 +129,7 @@ pub fn format_source(source: &str) -> Result<String, JitError> {
             | Token::ImmutableVar
             | Token::Fn
             | Token::Return
+            | Token::Continue
             | Token::If
             | Token::Else
             | Token::Spawn
@@ -135,6 +141,10 @@ pub fn format_source(source: &str) -> Result<String, JitError> {
             }
             Token::Range => {
                 output.push_str("..");
+                need_space = false;
+            }
+            Token::Not => {
+                output.push('!');
                 need_space = false;
             }
             Token::LineComment => {

@@ -35,8 +35,11 @@ pub enum Generation {
 
 pub enum ManagedObject {
     String(Arc<str>),
-    List(Box<[AtomicU64]>),
+    List(std::sync::RwLock<Vec<AtomicU64>>),
     Object(std::sync::RwLock<rustc_hash::FxHashMap<u32, AtomicU64>>),
+    Timestamp(std::time::Instant),
+    Range { start: f64, end: f64, step: f64 },
+    BoundMethod { receiver: Value, name_id: u32 },
 }
 
 impl ManagedObject {
@@ -46,6 +49,7 @@ impl ManagedObject {
     {
         match self {
             ManagedObject::List(elements) => {
+                let elements = elements.read().unwrap();
                 for atomic_v in elements.iter() {
                     let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
                     if let Some(child_id) = v.as_obj_id() {
@@ -63,6 +67,13 @@ impl ManagedObject {
                 }
             }
             ManagedObject::String(_) => {}
+            ManagedObject::Timestamp(_) => {}
+            ManagedObject::Range { .. } => {}
+            ManagedObject::BoundMethod { receiver, .. } => {
+                if let Some(child_id) = receiver.as_obj_id() {
+                    f(child_id);
+                }
+            }
         }
     }
 }
@@ -79,11 +90,13 @@ pub enum Callable {
     Native(NativeFn),
 }
 
+pub type TaskRegisters = Arc<Mutex<Vec<Arc<[AtomicU64]>>>>;
+
 pub struct Context {
     pub globals: Arc<[AtomicU64]>,
     pub string_pool: Arc<[Arc<str>]>,
     pub callables: Arc<[Option<Callable>]>,
-    pub active_registers: Mutex<Vec<Arc<Mutex<Vec<Arc<[AtomicU64]>>>>>>,
+    pub active_registers: Mutex<Vec<TaskRegisters>>,
     pub heap: Heap,
 }
 
@@ -99,7 +112,7 @@ use rayon::prelude::*;
 impl Heap {
     pub fn collect_garbage(&self, ctx: &Context) {
         let gc_id = self.gc_count.fetch_add(1, Ordering::Relaxed) + 1;
-        if gc_id % 5 == 0 {
+        if gc_id.is_multiple_of(5) {
             self.major_gc(gc_id, ctx);
         } else {
             self.minor_gc(gc_id, ctx);
@@ -243,12 +256,11 @@ impl Heap {
     ) -> bool {
         let mut found = false;
         obj.obj.visit_children(|child_id| {
-            if !found {
-                if let Some(Some(child)) = heap_objs.get(child_id as usize)
-                    && child.generation == Generation::Nursery
-                {
-                    found = true;
-                }
+            if !found
+                && let Some(Some(child)) = heap_objs.get(child_id as usize)
+                && child.generation == Generation::Nursery
+            {
+                found = true;
             }
         });
         found
@@ -274,8 +286,8 @@ impl Context {
         if (3..=9).contains(&tag) {
             let len = (tag - 3) as usize;
             let mut bytes = [0u8; 6];
-            for i in 0..len {
-                bytes[i] = ((bits >> (i * 8)) & 0xFF) as u8;
+            for (i, byte) in bytes.iter_mut().enumerate().take(len) {
+                *byte = ((bits >> (i * 8)) & 0xFF) as u8;
             }
             let s = std::str::from_utf8(&bytes[..len]).ok()?;
             self.string_pool
