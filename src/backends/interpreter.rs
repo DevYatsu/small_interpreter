@@ -5,6 +5,7 @@ use crate::{
     compiler::{Instruction, Program, QNAN, Value},
     error::JitError,
 };
+use parking_lot::RwLock;
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
@@ -119,7 +120,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
         callables,
         active_registers: std::sync::Mutex::new(Vec::new()),
         heap: Heap {
-            objects: std::sync::RwLock::new(heap_init),
+            objects: RwLock::new(heap_init),
             metadata: std::sync::Mutex::new(HeapMetadata {
                 free_list: Vec::new(),
                 nursery_ids: Vec::new(),
@@ -140,7 +141,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
         .push(task_roots.clone());
 
     execute_bytecode(
-        program.instructions.clone(),
+        &program.instructions,
         ctx.clone(),
         &mut join_set,
         registers,
@@ -176,7 +177,7 @@ async fn drain_join_set(join_set: &mut JoinSet<Result<(), JitError>>) -> Result<
 /// collector can trace and protect live objects during collection cycles.
 #[async_recursion::async_recursion]
 pub async fn execute_bytecode(
-    instructions: Arc<[Instruction]>,
+    instructions: &Arc<[Instruction]>,
     ctx: Arc<Context>,
     join_set: &mut JoinSet<Result<(), JitError>>,
     registers: Arc<[AtomicU64]>,
@@ -302,7 +303,7 @@ pub async fn execute_bytecode(
                 Callable::User(func) => {
                     let f_regs = build_call_registers(func.locals_count, &$args_vals);
                     let _ = execute_bytecode(
-                        func.instructions.clone(),
+                        &func.instructions,
                         ctx.clone(),
                         join_set,
                         f_regs,
@@ -353,12 +354,13 @@ pub async fn execute_bytecode(
             }
 
             // --- Calls ---
-            Instruction::Call {
-                name_id,
-                args_regs,
-                dst,
-                loc,
-            } => {
+            Instruction::Call(box_data) => {
+                let crate::compiler::CallData {
+                    name_id,
+                    args_regs,
+                    dst,
+                    loc,
+                } = &**box_data;
                 let callable = ctx.get_callable(*name_id).ok_or_else(|| {
                     let name = unsafe { ctx.string_pool.get_unchecked(*name_id as usize) };
                     JitError::runtime(
@@ -387,18 +389,19 @@ pub async fn execute_bytecode(
                 dispatch_call!(callable, args, dst.map(|r| r), *loc);
             }
 
-            Instruction::CallDynamic {
-                callee_reg,
-                args_regs,
-                dst,
-                loc,
-            } => {
+            Instruction::CallDynamic(box_data) => {
+                let crate::compiler::CallDynamicData {
+                    callee_reg,
+                    args_regs,
+                    dst,
+                    loc,
+                } = &**box_data;
                 let callee_val = load(&registers, *callee_reg);
                 let args: Vec<Value> = args_regs.iter().map(|&r| load(&registers, r)).collect();
 
                 // Handle BoundMethod (e.g., range.step(...) or list.pad(...))
                 if let Some(oid) = callee_val.as_obj_id() {
-                    let heap = ctx.heap.objects.read().unwrap();
+                    let heap = ctx.heap.objects.read();
                     if let Some(Some(obj_ref)) = heap.get(oid as usize) {
                         if let ManagedObject::BoundMethod { receiver, name_id } = &obj_ref.obj {
                             let method = pool_name(&ctx, *name_id).to_owned();
@@ -416,10 +419,10 @@ pub async fn execute_bytecode(
                                         .copied()
                                         .unwrap_or_else(|| Value::from_bits(0))
                                         .to_bits();
-                                    let heap = ctx.heap.objects.read().unwrap();
+                                    let heap = ctx.heap.objects.read();
                                     if let Some(Some(list_obj)) = heap.get(list_oid as usize) {
                                         if let ManagedObject::List(elements) = &list_obj.obj {
-                                            let mut w = elements.write().unwrap();
+                                            let mut w = elements.write();
                                             if w.len() < n {
                                                 w.resize_with(n, || AtomicU64::new(fill_bits));
                                             }
@@ -433,7 +436,7 @@ pub async fn execute_bytecode(
                                     // Extract start/end while holding the read-lock, then drop
                                     // it before calling ctx.alloc(), which needs the write-lock.
                                     let range_vals = {
-                                        let heap = ctx.heap.objects.read().unwrap();
+                                        let heap = ctx.heap.objects.read();
                                         if let Some(Some(r_obj)) = heap.get(r_oid as usize) {
                                             if let ManagedObject::Range { start, end, .. } =
                                                 &r_obj.obj
@@ -575,7 +578,7 @@ pub async fn execute_bytecode(
             } => {
                 let range_val = load(&registers, *range);
                 let (s, e, st) = if let Some(oid) = range_val.as_obj_id() {
-                    let heap = ctx.heap.objects.read().unwrap();
+                    let heap = ctx.heap.objects.read();
                     if let Some(Some(obj_ref)) = heap.get(oid as usize) {
                         if let ManagedObject::Range { start, end, step } = &obj_ref.obj {
                             (*start, *end, *step)
@@ -687,10 +690,9 @@ pub async fn execute_bytecode(
             // --- Lists ---
             Instruction::NewList { dst, len } => {
                 let elements: Vec<AtomicU64> = (0..*len).map(|_| AtomicU64::new(0)).collect();
-                ctx.alloc(
-                    ManagedObject::List(std::sync::RwLock::new(elements)),
-                    unsafe { registers.get_unchecked(*dst) },
-                );
+                ctx.alloc(ManagedObject::List(RwLock::new(elements)), unsafe {
+                    registers.get_unchecked(*dst)
+                });
             }
             Instruction::ListGet {
                 dst,
@@ -717,7 +719,7 @@ pub async fn execute_bytecode(
                         loc.col as usize,
                     )
                 })?;
-                let heap = ctx.heap.objects.read().unwrap();
+                let heap = ctx.heap.objects.read();
                 let obj = heap
                     .get(oid as usize)
                     .and_then(|o| o.as_ref())
@@ -735,7 +737,7 @@ pub async fn execute_bytecode(
                         loc.col as usize,
                     ));
                 };
-                let lock = elements.read().unwrap();
+                let lock = elements.read();
                 let slot = lock.get(index).ok_or_else(|| {
                     JitError::runtime(
                         format!(
@@ -786,7 +788,7 @@ pub async fn execute_bytecode(
                         loc.col as usize,
                     )
                 })?;
-                let heap = ctx.heap.objects.read().unwrap();
+                let heap = ctx.heap.objects.read();
                 let obj = heap
                     .get(oid as usize)
                     .and_then(|o| o.as_ref())
@@ -806,20 +808,20 @@ pub async fn execute_bytecode(
                 };
 
                 // Grow the list if needed (double-checked to avoid data race).
-                if elements.read().unwrap().len() <= index {
-                    let mut write = elements.write().unwrap();
+                if elements.read().len() <= index {
+                    let mut write = elements.write();
                     if write.len() <= index {
                         write.resize_with(index + 1, Default::default);
                     }
                     write[index].store(src_bits, Ordering::Relaxed);
                 } else {
-                    elements.read().unwrap()[index].store(src_bits, Ordering::Relaxed);
+                    elements.read()[index].store(src_bits, Ordering::Relaxed);
                 }
 
                 // Write barrier: track tenured → nursery references.
                 if obj.generation == Generation::Tenured && (src_bits & QNAN) == QNAN {
                     if let Some(src_oid) = Value::from_bits(src_bits).as_obj_id() {
-                        let heap2 = ctx.heap.objects.read().unwrap();
+                        let heap2 = ctx.heap.objects.read();
                         if let Some(Some(src_obj)) = heap2.get(src_oid as usize) {
                             if src_obj.generation == Generation::Nursery {
                                 ctx.heap.metadata.lock().unwrap().remembered_set.insert(oid);
@@ -833,10 +835,9 @@ pub async fn execute_bytecode(
             Instruction::NewObject { dst, capacity } => {
                 let fields =
                     rustc_hash::FxHashMap::with_capacity_and_hasher(*capacity, Default::default());
-                ctx.alloc(
-                    ManagedObject::Object(std::sync::RwLock::new(fields)),
-                    unsafe { registers.get_unchecked(*dst) },
-                );
+                ctx.alloc(ManagedObject::Object(RwLock::new(fields)), unsafe {
+                    registers.get_unchecked(*dst)
+                });
             }
             Instruction::ObjectGet {
                 dst,
@@ -853,11 +854,11 @@ pub async fn execute_bytecode(
                 }
 
                 let get_result = if let Some(oid) = obj_val.as_obj_id() {
-                    let heap = ctx.heap.objects.read().unwrap();
+                    let heap = ctx.heap.objects.read();
                     if let Some(Some(obj_ref)) = heap.get(oid as usize) {
                         match &obj_ref.obj {
                             ManagedObject::Object(fields) => {
-                                let fields = fields.read().unwrap();
+                                let fields = fields.read();
                                 let val = fields
                                     .get(name_id)
                                     .map(|s| Value::from_bits(s.load(Ordering::Relaxed)))
@@ -936,7 +937,7 @@ pub async fn execute_bytecode(
                         loc.col as usize,
                     )
                 })?;
-                let heap = ctx.heap.objects.read().unwrap();
+                let heap = ctx.heap.objects.read();
                 let obj_ref = heap
                     .get(oid as usize)
                     .and_then(|o| o.as_ref())
@@ -957,15 +958,12 @@ pub async fn execute_bytecode(
 
                 // Insert or update field (prefer read-lock update when slot exists).
                 {
-                    let fields_read = fields.read().unwrap();
+                    let fields_read = fields.read();
                     if let Some(slot) = fields_read.get(name_id) {
                         slot.store(src_bits, Ordering::Relaxed);
                     } else {
                         drop(fields_read);
-                        fields
-                            .write()
-                            .unwrap()
-                            .insert(*name_id, AtomicU64::new(src_bits));
+                        fields.write().insert(*name_id, AtomicU64::new(src_bits));
                     }
                 }
 
@@ -982,12 +980,13 @@ pub async fn execute_bytecode(
             }
 
             // --- Concurrency ---
-            Instruction::Spawn {
-                instructions: body,
-                locals_count,
-                captures,
-            } => {
-                let body = Arc::clone(body);
+            Instruction::Spawn(box_data) => {
+                let crate::compiler::SpawnData {
+                    instructions: t_instrs,
+                    locals_count,
+                    captures,
+                } = &**box_data;
+                let body = Arc::clone(t_instrs);
                 let s_ctx = ctx.clone();
 
                 let t_regs: Vec<AtomicU64> =
@@ -1004,7 +1003,7 @@ pub async fn execute_bytecode(
                     s_ctx.active_registers.lock().unwrap().push(t_roots.clone());
 
                     let res =
-                        execute_bytecode(body, s_ctx, &mut js, thread_regs, None, t_roots).await;
+                        execute_bytecode(&body.clone(), s_ctx, &mut js, thread_regs, None, t_roots).await;
                     drain_join_set(&mut js).await?;
                     res.map(|_| ())
                 });
@@ -1054,12 +1053,12 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                 };
                 let val = *val;
                 if let Some(oid) = val.as_obj_id() {
-                    let heap = ctx.heap.objects.read().unwrap();
+                    let heap = ctx.heap.objects.read();
                     if let Some(Some(obj)) = heap.get(oid as usize) {
                         return Ok(Value::number(match &obj.obj {
                             ManagedObject::String(s) => s.len() as f64,
-                            ManagedObject::List(l) => l.read().unwrap().len() as f64,
-                            ManagedObject::Object(o) => o.read().unwrap().len() as f64,
+                            ManagedObject::List(l) => l.read().len() as f64,
+                            ManagedObject::Object(o) => o.read().len() as f64,
                             ManagedObject::Timestamp(_) => 0.0,
                             ManagedObject::Range { start, end, step } => {
                                 if *step == 0.0 {
@@ -1269,7 +1268,7 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                                     .push(t_roots.clone());
 
                                 match execute_bytecode(
-                                    f.instructions.clone(),
+                                    &f.instructions,
                                     ctx.clone(),
                                     &mut js,
                                     registers,
@@ -1356,12 +1355,12 @@ fn stringify_value(ctx: &Context, val: Value) -> String {
         return s;
     }
     if let Some(oid) = val.as_obj_id() {
-        let heap = ctx.heap.objects.read().unwrap();
+        let heap = ctx.heap.objects.read();
         if let Some(Some(crate::backends::HeapObject { obj, .. })) = heap.get(oid as usize) {
             return match obj {
                 ManagedObject::String(s) => s.to_string(),
                 ManagedObject::List(elements) => {
-                    let lock = elements.read().unwrap();
+                    let lock = elements.read();
                     let items: Vec<String> = lock
                         .iter()
                         .map(|a| {
@@ -1371,7 +1370,7 @@ fn stringify_value(ctx: &Context, val: Value) -> String {
                     format!("[{}]", items.join(", "))
                 }
                 ManagedObject::Object(fields) => {
-                    let fields = fields.read().unwrap();
+                    let fields = fields.read();
                     let entries: Vec<String> = fields
                         .iter()
                         .map(|(&name_id, atomic_val)| {
@@ -1409,7 +1408,7 @@ fn stringify_value_nested(ctx: &Context, val: Value) -> String {
         return format!("\"{}\"", s);
     }
     if let Some(oid) = val.as_obj_id() {
-        let heap = ctx.heap.objects.read().unwrap();
+        let heap = ctx.heap.objects.read();
         if let Some(Some(crate::backends::HeapObject { obj, .. })) = heap.get(oid as usize) {
             return match obj {
                 ManagedObject::String(s) => format!("\"{}\"", s),

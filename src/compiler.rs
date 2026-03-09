@@ -111,7 +111,7 @@ impl Value {
             return Some(f(s));
         }
         if let Some(oid) = self.as_obj_id() {
-            let heap = ctx.heap.objects.read().unwrap();
+            let heap = ctx.heap.objects.read();
             if let Some(Some(obj)) = heap.get(oid as usize)
                 && let ManagedObject::String(s) = &obj.obj
             {
@@ -231,14 +231,7 @@ pub enum Instruction {
     /// Logical NOT of a value.
     Not { dst: usize, src: usize, loc: Loc },
     /// Spawn a new concurrent task.
-    Spawn {
-        /// The instructions for the new task.
-        instructions: Arc<[Instruction]>,
-        /// Number of registers the task needs.
-        locals_count: usize,
-        /// Register indices to capture from the current task.
-        captures: Arc<[usize]>,
-    },
+    Spawn(Box<SpawnData>),
     /// Create a new list object on the heap.
     NewList { dst: usize, len: usize },
     /// Retrieve an element from a list at a specified index.
@@ -272,20 +265,10 @@ pub enum Instruction {
         loc: Loc,
     },
     /// Call a function (user or native) by its name ID in the string pool.
-    Call {
-        name_id: u32,
-        args_regs: Arc<[usize]>,
-        dst: Option<usize>,
-        loc: Loc,
-    },
+    Call(Box<CallData>),
     /// Call a function dynamically — the callee_reg holds a string (SSO or heap)
     /// naming either a user function or a native function, resolved at runtime.
-    CallDynamic {
-        callee_reg: usize,
-        args_regs: Arc<[usize]>,
-        dst: Option<usize>,
-        loc: Loc,
-    },
+    CallDynamic(Box<CallDynamicData>),
     /// Create a range object on the heap.
     Range {
         dst: usize,
@@ -303,6 +286,29 @@ pub enum Instruction {
     },
     /// Return from the current function with an optional value.
     Return(Option<usize>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnData {
+    pub instructions: Arc<[Instruction]>,
+    pub locals_count: usize,
+    pub captures: Arc<[usize]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallData {
+    pub name_id: u32,
+    pub args_regs: Arc<[usize]>,
+    pub dst: Option<usize>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallDynamicData {
+    pub callee_reg: usize,
+    pub args_regs: Arc<[usize]>,
+    pub dst: Option<usize>,
+    pub loc: Loc,
 }
 
 /// A compiled user-defined function.

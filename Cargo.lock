@@ -1331,6 +1331,7 @@ dependencies = [
  "async-recursion",
  "logos",
  "mimalloc",
+ "parking_lot",
  "pico-args",
  "rayon",
  "reqwest",

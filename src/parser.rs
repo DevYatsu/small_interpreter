@@ -315,20 +315,22 @@ impl<'source> Parser<'source> {
 
                     if let Some(info) = self.get_var(id) {
                         let callee_reg = self.load_var(info, instructions);
-                        instructions.push(Instruction::CallDynamic {
-                            callee_reg,
-                            args_regs: Arc::from(args),
-                            dst: Some(dst),
-                            loc: self.loc(),
-                        });
+                        instructions.push(Instruction::CallDynamic(Box::new(
+                            crate::compiler::CallDynamicData {
+                                callee_reg,
+                                args_regs: Arc::from(args),
+                                dst: Some(dst),
+                                loc: self.loc(),
+                            },
+                        )));
                     } else {
                         let name_id = self.intern(id);
-                        instructions.push(Instruction::Call {
+                        instructions.push(Instruction::Call(Box::new(crate::compiler::CallData {
                             name_id,
                             args_regs: Arc::from(args),
                             dst: Some(dst),
                             loc: self.loc(),
-                        });
+                        })));
                     }
                     Ok(dst)
                 } else if let Some(info) = self.get_var(id) {
@@ -401,12 +403,14 @@ impl<'source> Parser<'source> {
                     self.advance()?;
                     let args = self.parse_call_args(instructions)?;
                     let dst = self.alloc_reg();
-                    instructions.push(Instruction::CallDynamic {
-                        callee_reg: current_reg,
-                        args_regs: Arc::from(args),
-                        dst: Some(dst),
-                        loc: self.loc(),
-                    });
+                    instructions.push(Instruction::CallDynamic(Box::new(
+                        crate::compiler::CallDynamicData {
+                            callee_reg: current_reg,
+                            args_regs: Arc::from(args),
+                            dst: Some(dst),
+                            loc: self.loc(),
+                        },
+                    )));
                     current_reg = dst;
                 }
                 _ => break,
@@ -679,20 +683,22 @@ impl<'source> Parser<'source> {
 
         if let Some(info) = self.get_var(id) {
             let callee_reg = self.load_var(info, instructions);
-            instructions.push(Instruction::CallDynamic {
-                callee_reg,
-                args_regs: Arc::from(args),
-                dst: None,
-                loc: self.loc(),
-            });
+            instructions.push(Instruction::CallDynamic(Box::new(
+                crate::compiler::CallDynamicData {
+                    callee_reg,
+                    args_regs: Arc::from(args),
+                    dst: None,
+                    loc: self.loc(),
+                },
+            )));
         } else {
             let name_id = self.intern(id);
-            instructions.push(Instruction::Call {
+            instructions.push(Instruction::Call(Box::new(crate::compiler::CallData {
                 name_id,
                 args_regs: Arc::from(args),
                 dst: None,
                 loc: self.loc(),
-            });
+            })));
         }
         Ok(())
     }
@@ -1045,11 +1051,11 @@ impl<'source> Parser<'source> {
         let mut captures: Vec<usize> = captures_set.into_iter().collect();
         captures.sort_unstable();
 
-        instructions.push(Instruction::Spawn {
+        instructions.push(Instruction::Spawn(Box::new(crate::compiler::SpawnData {
             instructions: Arc::from(body),
             locals_count: self.next_reg.max(regs_at_start),
             captures: Arc::from(captures),
-        });
+        })));
         Ok(())
     }
 
@@ -1232,12 +1238,12 @@ impl<'source> Parser<'source> {
                     let reg = self.parse_sub_expr(expr_src, instructions)?;
                     let str_id = self.intern("str");
                     let dst = self.alloc_reg();
-                    instructions.push(Instruction::Call {
+                    instructions.push(Instruction::Call(Box::new(crate::compiler::CallData {
                         name_id: str_id,
                         args_regs: Arc::from(vec![reg]),
                         dst: Some(dst),
                         loc: self.loc(),
-                    });
+                    })));
                     dst
                 }
             };

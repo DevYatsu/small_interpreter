@@ -19,7 +19,7 @@ use crate::error::JitError;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 pub mod interpreter;
 
@@ -35,8 +35,8 @@ pub enum Generation {
 
 pub enum ManagedObject {
     String(Arc<str>),
-    List(std::sync::RwLock<Vec<AtomicU64>>),
-    Object(std::sync::RwLock<rustc_hash::FxHashMap<u32, AtomicU64>>),
+    List(parking_lot::RwLock<Vec<AtomicU64>>),
+    Object(parking_lot::RwLock<rustc_hash::FxHashMap<u32, AtomicU64>>),
     Timestamp(std::time::Instant),
     Range { start: f64, end: f64, step: f64 },
     BoundMethod { receiver: Value, name_id: u32 },
@@ -49,7 +49,7 @@ impl ManagedObject {
     {
         match self {
             ManagedObject::List(elements) => {
-                let elements = elements.read().unwrap();
+                let elements = elements.read();
                 for atomic_v in elements.iter() {
                     let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
                     if let Some(child_id) = v.as_obj_id() {
@@ -58,7 +58,7 @@ impl ManagedObject {
                 }
             }
             ManagedObject::Object(fields) => {
-                let fields = fields.read().unwrap();
+                let fields = fields.read();
                 for atomic_v in fields.values() {
                     let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
                     if let Some(child_id) = v.as_obj_id() {
@@ -101,7 +101,7 @@ pub struct Context {
 }
 
 pub struct Heap {
-    pub objects: RwLock<Vec<Option<HeapObject>>>,
+    pub objects: parking_lot::RwLock<Vec<Option<HeapObject>>>,
     pub metadata: Mutex<HeapMetadata>,
     pub gc_count: AtomicU32,
     pub alloc_since_gc: AtomicUsize,
@@ -120,7 +120,7 @@ impl Heap {
     }
 
     pub fn major_gc(&self, gc_id: u32, ctx: &Context) {
-        let mut objects = self.objects.write().unwrap();
+        let mut objects = self.objects.write();
         let mut worklist = Vec::new();
 
         self.trace_roots(ctx, &mut worklist);
@@ -158,7 +158,7 @@ impl Heap {
     }
 
     pub fn minor_gc(&self, gc_id: u32, ctx: &Context) {
-        let mut objects = self.objects.write().unwrap();
+        let mut objects = self.objects.write();
         let mut worklist = Vec::new();
 
         self.trace_roots(ctx, &mut worklist);
@@ -298,7 +298,7 @@ impl Context {
             if (oid as usize) < self.string_pool.len() {
                 return Some(oid);
             }
-            let heap = self.heap.objects.read().unwrap();
+            let heap = self.heap.objects.read();
             if let Some(Some(obj)) = heap.get(oid as usize)
                 && let ManagedObject::String(s) = &obj.obj
             {
@@ -326,7 +326,7 @@ impl Context {
             self.heap.collect_garbage(self);
         }
 
-        let mut objects = self.heap.objects.write().unwrap();
+        let mut objects = self.heap.objects.write();
         let mut meta = self.heap.metadata.lock().unwrap();
 
         let id = if let Some(id) = meta.free_list.pop() {
@@ -370,7 +370,7 @@ impl Context {
         }
 
         if let (Some(id1), Some(id2)) = (v1.as_obj_id(), v2.as_obj_id()) {
-            let heap = self.heap.objects.read().unwrap();
+            let heap = self.heap.objects.read();
             if id1 < heap.len() as u32
                 && id2 < heap.len() as u32
                 && let (Some(o1), Some(o2)) = (&heap[id1 as usize], &heap[id2 as usize])
