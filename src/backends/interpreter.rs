@@ -183,7 +183,7 @@ pub async fn execute_bytecode(
                             .store(Value::number(lv $op rv).to_bits(), Ordering::Relaxed);
                     }
                 } else {
-                    return Err(JitError::Runtime(
+                    return Err(JitError::runtime(
                         format!("Math error: expected numbers for '{}'", stringify!($op)),
                         $loc.line as usize,
                         $loc.col as usize,
@@ -215,7 +215,7 @@ pub async fn execute_bytecode(
                         .store(Value::bool(res).to_bits(), Ordering::Relaxed);
                 }
             } else {
-                return Err(JitError::Runtime(
+                return Err(JitError::runtime(
                     format!("Compare error: expected numbers for '{}'", stringify!($op)),
                     $loc.line as usize,
                     $loc.col as usize,
@@ -287,7 +287,7 @@ pub async fn execute_bytecode(
                         }
                         Callable::User(func) => {
                             if args_regs.len() != func.params_count {
-                                return Err(JitError::Runtime(
+                                return Err(JitError::runtime(
                                     format!(
                                         "Function call arity mismatch: expected {}, got {}",
                                         func.params_count,
@@ -321,7 +321,7 @@ pub async fn execute_bytecode(
                     }
                 } else {
                     let name = unsafe { ctx.string_pool.get_unchecked(*name_id as usize) };
-                    return Err(JitError::Runtime(
+                    return Err(JitError::runtime(
                         format!("Unknown function: {}", name),
                         loc.line as usize,
                         loc.col as usize,
@@ -340,8 +340,8 @@ pub async fn execute_bytecode(
                     unsafe { registers.get_unchecked(*callee_reg).load(Ordering::Relaxed) };
                 let callee_val = Value::from_bits(callee_bits);
                 let name_id = ctx.value_as_pool_id(callee_val).ok_or_else(|| {
-                    JitError::Runtime(
-                        "CallDynamic: callee is not a known function name".into(),
+                    JitError::runtime(
+                        "CallDynamic: callee is not a known function name",
                         loc.line as usize,
                         loc.col as usize,
                     )
@@ -392,7 +392,7 @@ pub async fn execute_bytecode(
                         }
                     }
                 } else {
-                    return Err(JitError::Runtime(
+                    return Err(JitError::runtime(
                         format!(
                             "CallDynamic: unknown function '{}'",
                             ctx.string_pool
@@ -478,8 +478,8 @@ pub async fn execute_bytecode(
                                 });
                             }
                         } else {
-                            return Err(JitError::Runtime(
-                                "Add error: expected numbers or strings".into(),
+                            return Err(JitError::runtime(
+                                "Add error: expected numbers or strings",
                                 loc.line as usize,
                                 loc.col as usize,
                             ));
@@ -623,8 +623,8 @@ pub async fn execute_bytecode(
                     registers.get_unchecked(*index_reg).load(Ordering::Relaxed)
                 });
                 let index = index_val.as_number().map(|n| n as usize).ok_or_else(|| {
-                    JitError::Runtime(
-                        "List index must be a number".into(),
+                    JitError::runtime(
+                        "List index must be a number",
                         loc.line as usize,
                         loc.col as usize,
                     )
@@ -645,7 +645,7 @@ pub async fn execute_bytecode(
                                     .store(val_bits, Ordering::Relaxed);
                             }
                         } else {
-                            return Err(JitError::Runtime(
+                            return Err(JitError::runtime(
                                 format!(
                                     "Index out of bounds: {} for list of length {}",
                                     index,
@@ -656,15 +656,15 @@ pub async fn execute_bytecode(
                             ));
                         }
                     } else {
-                        return Err(JitError::Runtime(
-                            "Expected list for indexing".into(),
+                        return Err(JitError::runtime(
+                            "Expected list for indexing",
                             loc.line as usize,
                             loc.col as usize,
                         ));
                     }
                 } else {
-                    return Err(JitError::Runtime(
-                        "Expected list for indexing".into(),
+                    return Err(JitError::runtime(
+                        "Expected list for indexing",
                         loc.line as usize,
                         loc.col as usize,
                     ));
@@ -689,8 +689,8 @@ pub async fn execute_bytecode(
                 } else {
                     let index_val = Value::from_bits(index_bits);
                     index_val.as_number().map(|n| n as usize).ok_or_else(|| {
-                        JitError::Runtime(
-                            "List index must be a number".into(),
+                        JitError::runtime(
+                            "List index must be a number",
                             loc.line as usize,
                             loc.col as usize,
                         )
@@ -723,7 +723,7 @@ pub async fn execute_bytecode(
                                     }
                                 }
                             } else {
-                                return Err(JitError::Runtime(
+                                return Err(JitError::runtime(
                                     format!(
                                         "Index out of bounds: {} for list of length {}",
                                         index,
@@ -734,22 +734,22 @@ pub async fn execute_bytecode(
                                 ));
                             }
                         } else {
-                            return Err(JitError::Runtime(
-                                "Expected list for indexing".into(),
+                            return Err(JitError::runtime(
+                                "Expected list for indexing",
                                 loc.line as usize,
                                 loc.col as usize,
                             ));
                         }
                     } else {
-                        return Err(JitError::Runtime(
-                            "Expected list for indexing".into(),
+                        return Err(JitError::runtime(
+                            "Expected list for indexing",
                             loc.line as usize,
                             loc.col as usize,
                         ));
                     }
                 } else {
-                    return Err(JitError::Runtime(
-                        "Expected list for indexing".into(),
+                    return Err(JitError::runtime(
+                        "Expected list for indexing",
                         loc.line as usize,
                         loc.col as usize,
                     ));
@@ -791,22 +791,22 @@ pub async fn execute_bytecode(
                                 }
                             }
                         } else {
-                            return Err(JitError::Runtime(
-                                "Expected object for property access".into(),
+                            return Err(JitError::runtime(
+                                "Expected object for property access",
                                 loc.line as usize,
                                 loc.col as usize,
                             ));
                         }
                     } else {
-                        return Err(JitError::Runtime(
-                            "Expected object for property access".into(),
+                        return Err(JitError::runtime(
+                            "Expected object for property access",
                             loc.line as usize,
                             loc.col as usize,
                         ));
                     }
                 } else {
-                    return Err(JitError::Runtime(
-                        "Expected object for property access".into(),
+                    return Err(JitError::runtime(
+                        "Expected object for property access",
                         loc.line as usize,
                         loc.col as usize,
                     ));
@@ -857,22 +857,22 @@ pub async fn execute_bytecode(
                                 }
                             }
                         } else {
-                            return Err(JitError::Runtime(
-                                "Expected object for property assignment".into(),
+                            return Err(JitError::runtime(
+                                "Expected object for property assignment",
                                 loc.line as usize,
                                 loc.col as usize,
                             ));
                         }
                     } else {
-                        return Err(JitError::Runtime(
-                            "Expected object for property assignment".into(),
+                        return Err(JitError::runtime(
+                            "Expected object for property assignment",
                             loc.line as usize,
                             loc.col as usize,
                         ));
                     }
                 } else {
-                    return Err(JitError::Runtime(
-                        "Expected object for property assignment".into(),
+                    return Err(JitError::runtime(
+                        "Expected object for property assignment",
                         loc.line as usize,
                         loc.col as usize,
                     ));
@@ -947,8 +947,8 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
         Arc::new(|ctx, args, loc| {
             Box::pin(async move {
                 if args.len() != 1 {
-                    return Err(JitError::Runtime(
-                        "len() expects 1 argument".into(),
+                    return Err(JitError::runtime(
+                        "len() expects 1 argument",
                         loc.line as usize,
                         loc.col as usize,
                     ));
@@ -968,8 +968,8 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                 } else if let Some(s) = val.as_string(&ctx) {
                     return Ok(Value::number(s.len() as f64));
                 }
-                Err(JitError::Runtime(
-                    "len() expects string or list".into(),
+                Err(JitError::runtime(
+                    "len() expects string or list",
                     loc.line as usize,
                     loc.col as usize,
                 ))
@@ -995,8 +995,8 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
         Arc::new(|_, args, loc| {
             Box::pin(async move {
                 if args.len() != 1 {
-                    return Err(JitError::Runtime(
-                        "sleep() expects 1 argument".into(),
+                    return Err(JitError::runtime(
+                        "sleep() expects 1 argument",
                         loc.line as usize,
                         loc.col as usize,
                     ));
@@ -1005,8 +1005,8 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                     tokio::time::sleep(tokio::time::Duration::from_millis(ms as u64)).await;
                     Ok(Value::from_bits(0))
                 } else {
-                    Err(JitError::Runtime(
-                        "sleep() expects numeric milliseconds".into(),
+                    Err(JitError::runtime(
+                        "sleep() expects numeric milliseconds",
                         loc.line as usize,
                         loc.col as usize,
                     ))
@@ -1020,16 +1020,16 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
         Arc::new(|ctx, args, loc| {
             Box::pin(async move {
                 if args.is_empty() {
-                    return Err(JitError::Runtime(
-                        "fetch requires at least 1 argument".into(),
+                    return Err(JitError::runtime(
+                        "fetch requires at least 1 argument",
                         loc.line as usize,
                         loc.col as usize,
                     ));
                 }
                 let val = args[0];
                 let url = val.as_string(&ctx).ok_or_else(|| {
-                    JitError::Runtime(
-                        "fetch error: expected string URL".into(),
+                    JitError::runtime(
+                        "fetch error: expected string URL",
                         loc.line as usize,
                         loc.col as usize,
                     )
@@ -1059,23 +1059,23 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
         Arc::new(|ctx, args, loc| {
             Box::pin(async move {
                 if args.len() != 2 {
-                    return Err(JitError::Runtime(
-                        "serve(port, handler) expects 2 arguments".into(),
+                    return Err(JitError::runtime(
+                        "serve(port, handler) expects 2 arguments",
                         loc.line as usize,
                         loc.col as usize,
                     ));
                 }
                 let port = args[0].as_number().ok_or_else(|| {
-                    JitError::Runtime(
-                        "serve error: port must be a number".into(),
+                    JitError::runtime(
+                        "serve error: port must be a number",
                         loc.line as usize,
                         loc.col as usize,
                     )
                 })? as u16;
 
                 let handler_name = args[1].as_string(&ctx).ok_or_else(|| {
-                    JitError::Runtime(
-                        "serve error: handler must be a function name string".into(),
+                    JitError::runtime(
+                        "serve error: handler must be a function name string",
                         loc.line as usize,
                         loc.col as usize,
                     )
@@ -1084,7 +1084,7 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                 let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
                     .await
                     .map_err(|e| {
-                        JitError::Runtime(
+                        JitError::runtime(
                             format!("Failed to bind to port {}: {}", port, e),
                             loc.line as usize,
                             loc.col as usize,
@@ -1097,7 +1097,7 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                     tokio::select! {
                         accept_res = listener.accept() => {
                             let (mut socket, _) = accept_res.map_err(|e| {
-                                JitError::Runtime(
+                                JitError::runtime(
                                     format!("Accept error: {}", e),
                                     loc.line as usize,
                                     loc.col as usize,
@@ -1154,7 +1154,7 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                                     }
                                     match execute_bytecode(instructions, ctx.clone(), &mut js, registers, None, t_roots).await {
                                         Ok(res) => {
-                                            let resp_body = res.as_string(&ctx).unwrap_or_else(|| "OK".into());
+                                            let resp_body = res.as_string(&ctx).unwrap_or_else(|| "OK".to_string());
                                             let full_resp = if resp_body.starts_with("HTTP/") {
                                                 resp_body
                                             } else {
@@ -1188,8 +1188,8 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
         Arc::new(|ctx, args, loc| {
             Box::pin(async move {
                 if args.len() != 1 {
-                    return Err(JitError::Runtime(
-                        "str() expects 1 argument".into(),
+                    return Err(JitError::runtime(
+                        "str() expects 1 argument",
                         loc.line as usize,
                         loc.col as usize,
                     ));

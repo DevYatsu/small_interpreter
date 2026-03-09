@@ -354,7 +354,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(JitError::RedefinitionOfImmutableVariable(_, _, _, _))
+                Err(JitError::RedefinitionOfImmutableVariable { .. })
             ),
             "expected RedefinitionOfImmutableVariable error, got {result:?}"
         );
@@ -365,7 +365,7 @@ mod tests {
         // Trying to assign to a variable that was never declared.
         let result = compile("z: 99");
         assert!(
-            matches!(result, Err(JitError::UnknownVariable(_, _, _))),
+            matches!(result, Err(JitError::UnknownVariable { .. })),
             "expected UnknownVariable error, got {result:?}"
         );
     }

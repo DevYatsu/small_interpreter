@@ -39,6 +39,34 @@ pub enum ManagedObject {
     Object(std::sync::RwLock<rustc_hash::FxHashMap<u32, AtomicU64>>),
 }
 
+impl ManagedObject {
+    pub fn visit_children<F>(&self, mut f: F)
+    where
+        F: FnMut(u32),
+    {
+        match self {
+            ManagedObject::List(elements) => {
+                for atomic_v in elements.iter() {
+                    let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
+                    if let Some(child_id) = v.as_obj_id() {
+                        f(child_id);
+                    }
+                }
+            }
+            ManagedObject::Object(fields) => {
+                let fields = fields.read().unwrap();
+                for atomic_v in fields.values() {
+                    let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
+                    if let Some(child_id) = v.as_obj_id() {
+                        f(child_id);
+                    }
+                }
+            }
+            ManagedObject::String(_) => {}
+        }
+    }
+}
+
 pub struct HeapObject {
     pub obj: ManagedObject,
     pub last_gc_id: u32,
@@ -66,6 +94,8 @@ pub struct Heap {
     pub alloc_since_gc: AtomicUsize,
 }
 
+use rayon::prelude::*;
+
 impl Heap {
     pub fn collect_garbage(&self, ctx: &Context) {
         let gc_id = self.gc_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -80,14 +110,14 @@ impl Heap {
         let mut objects = self.objects.write().unwrap();
         let mut worklist = Vec::new();
 
-        self.trace_roots(ctx, &objects, &mut worklist);
+        self.trace_roots(ctx, &mut worklist);
 
         while let Some(id) = worklist.pop() {
             if let Some(Some(obj)) = objects.get_mut(id as usize)
                 && obj.last_gc_id != gc_id
             {
                 obj.last_gc_id = gc_id;
-                self.trace_object_ids(obj, &mut worklist);
+                obj.obj.visit_children(|child_id| worklist.push(child_id));
             }
         }
 
@@ -95,28 +125,33 @@ impl Heap {
         meta.remembered_set.clear();
         meta.nursery_ids.clear();
 
-        for i in 0..objects.len() {
-            if let Some(ref mut obj) = objects[i] {
-                if obj.last_gc_id != gc_id {
-                    objects[i] = None;
-                    meta.free_list.push(i as u32);
-                } else {
-                    obj.generation = Generation::Tenured;
+        let free_ids: Vec<u32> = objects
+            .par_iter_mut()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                if let Some(obj) = slot {
+                    if obj.last_gc_id != gc_id {
+                        *slot = None;
+                        return Some(i as u32);
+                    } else {
+                        obj.generation = Generation::Tenured;
+                    }
                 }
-            }
-        }
+                None
+            })
+            .collect();
+
+        meta.free_list.extend(free_ids);
     }
 
     pub fn minor_gc(&self, gc_id: u32, ctx: &Context) {
         let mut objects = self.objects.write().unwrap();
         let mut worklist = Vec::new();
 
-        self.trace_roots(ctx, &objects, &mut worklist);
+        self.trace_roots(ctx, &mut worklist);
         {
             let meta = self.metadata.lock().unwrap();
-            for &id in meta.remembered_set.iter() {
-                worklist.push(id);
-            }
+            worklist.extend(meta.remembered_set.iter());
         }
 
         while let Some(id) = worklist.pop() {
@@ -124,7 +159,7 @@ impl Heap {
                 && obj.last_gc_id != gc_id
             {
                 obj.last_gc_id = gc_id;
-                self.trace_object_ids(obj, &mut worklist);
+                obj.obj.visit_children(|child_id| worklist.push(child_id));
             }
         }
 
@@ -144,33 +179,45 @@ impl Heap {
             }
         }
 
-        let mut new_remembered = rustc_hash::FxHashSet::default();
-        for &id in meta.remembered_set.iter() {
-            if let Some(Some(obj)) = objects.get(id as usize)
-                && obj.generation == Generation::Tenured
-                && self.check_points_to_nursery(obj, &objects)
-            {
-                new_remembered.insert(id);
-            }
-        }
+        let remembered_set = &meta.remembered_set;
+        let new_remembered_from_old: Vec<u32> = remembered_set
+            .par_iter()
+            .filter(|&&id| {
+                if let Some(Some(obj)) = objects.get(id as usize)
+                    && obj.generation == Generation::Tenured
+                    && self.check_points_to_nursery(obj, &objects)
+                {
+                    true
+                } else {
+                    false
+                }
+            })
+            .copied()
+            .collect();
 
-        for id in promoted_ids {
-            if let Some(Some(obj)) = objects.get(id as usize)
-                && self.check_points_to_nursery(obj, &objects)
-            {
-                new_remembered.insert(id);
-            }
-        }
-        meta.remembered_set = new_remembered;
+        let new_remembered_from_promoted: Vec<u32> = promoted_ids
+            .into_par_iter()
+            .filter(|&id| {
+                if let Some(Some(obj)) = objects.get(id as usize)
+                    && self.check_points_to_nursery(obj, &objects)
+                {
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        let mut new_set = rustc_hash::FxHashSet::default();
+        new_set.extend(new_remembered_from_old);
+        new_set.extend(new_remembered_from_promoted);
+        meta.remembered_set = new_set;
     }
 
-    fn trace_roots(&self, ctx: &Context, _objects: &[Option<HeapObject>], worklist: &mut Vec<u32>) {
-        for i in 0..ctx.string_pool.len() {
-            worklist.push(i as u32);
-        }
+    fn trace_roots(&self, ctx: &Context, worklist: &mut Vec<u32>) {
+        worklist.extend(0..ctx.string_pool.len() as u32);
         for global in ctx.globals.iter() {
-            let val = Value::from_bits(global.load(Ordering::Relaxed));
-            if let Some(id) = val.as_obj_id() {
+            if let Some(id) = Value::from_bits(global.load(Ordering::Relaxed)).as_obj_id() {
                 worklist.push(id);
             }
         }
@@ -179,29 +226,11 @@ impl Heap {
             let regs_stack = task_roots.lock().unwrap();
             for regs in regs_stack.iter() {
                 for atomic_val in regs.iter() {
-                    let val = Value::from_bits(atomic_val.load(Ordering::Relaxed));
-                    if let Some(id) = val.as_obj_id() {
+                    if let Some(id) =
+                        Value::from_bits(atomic_val.load(Ordering::Relaxed)).as_obj_id()
+                    {
                         worklist.push(id);
                     }
-                }
-            }
-        }
-    }
-
-    fn trace_object_ids(&self, obj: &HeapObject, worklist: &mut Vec<u32>) {
-        if let ManagedObject::List(elements) = &obj.obj {
-            for atomic_v in elements.iter() {
-                let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
-                if let Some(child_id) = v.as_obj_id() {
-                    worklist.push(child_id);
-                }
-            }
-        } else if let ManagedObject::Object(fields) = &obj.obj {
-            let fields = fields.read().unwrap();
-            for atomic_v in fields.values() {
-                let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
-                if let Some(child_id) = v.as_obj_id() {
-                    worklist.push(child_id);
                 }
             }
         }
@@ -212,29 +241,17 @@ impl Heap {
         obj: &HeapObject,
         heap_objs: &[Option<HeapObject>],
     ) -> bool {
-        if let ManagedObject::List(elements) = &obj.obj {
-            for atomic_v in elements.iter() {
-                let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
-                if let Some(child_id) = v.as_obj_id()
-                    && let Some(Some(child)) = heap_objs.get(child_id as usize)
+        let mut found = false;
+        obj.obj.visit_children(|child_id| {
+            if !found {
+                if let Some(Some(child)) = heap_objs.get(child_id as usize)
                     && child.generation == Generation::Nursery
                 {
-                    return true;
+                    found = true;
                 }
             }
-        } else if let ManagedObject::Object(fields) = &obj.obj {
-            let fields = fields.read().unwrap();
-            for atomic_v in fields.values() {
-                let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
-                if let Some(child_id) = v.as_obj_id()
-                    && let Some(Some(child)) = heap_objs.get(child_id as usize)
-                    && child.generation == Generation::Nursery
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        });
+        found
     }
 }
 

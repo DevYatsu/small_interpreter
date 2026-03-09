@@ -1,63 +1,79 @@
-//! Runtime and compile-time error types for the Pi interpreter.
-//!
-//! All errors carry a human-readable message and a `(line, col)` location that
-//! points back into the original source text, allowing [`crate::print_error`]
-//! to render a helpful caret-annotated diagnostic.
-
 use crate::lexer::LexingError;
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ErrorLoc {
+    pub line: usize,
+    pub col: usize,
+}
+
+impl ErrorLoc {
+    pub fn new(line: usize, col: usize) -> Self {
+        Self { line, col }
+    }
+}
+
+impl std::fmt::Display for ErrorLoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.line, self.col)
+    }
+}
+
 /// Every error that can be produced while compiling or running a Pi program.
-///
-/// Variants are ordered roughly by the pipeline stage that produces them:
-/// lexing → parsing → runtime.
 #[derive(Error, Debug, Clone)]
 pub enum JitError {
-    /// A character or token sequence that the lexer cannot recognise.
-    ///
-    /// Contains the underlying [`LexingError`] and the `(line, col)` of the
-    /// offending character.
-    #[error("Lexing error at {1}:{2}:  {0:?}")]
-    Lexing(LexingError, usize, usize),
+    #[error("Lexing error at {loc}: {err:?}")]
+    Lexing { err: LexingError, loc: ErrorLoc },
 
-    /// A syntactically invalid construct encountered during parsing or
-    /// bytecode generation.
-    ///
-    /// The contained string is a human-readable description of what was
-    /// expected vs. what was found.
-    #[error("Parsing error at {1}:{2}:  {0}")]
-    Parsing(String, usize, usize),
+    #[error("Parsing error at {loc}: {msg}")]
+    Parsing { msg: String, loc: ErrorLoc },
 
-    /// An error that occurs at runtime (e.g. type mismatch, index out of
-    /// bounds, unknown native function).
-    #[error("Runtime error at {1}:{2}:  {0}")]
-    Runtime(String, usize, usize),
+    #[error("Runtime error at {loc}: {msg}")]
+    Runtime { msg: String, loc: ErrorLoc },
 
-    /// A variable name was referenced that had never been declared.
-    #[error("Unknown variable at {1}:{2}:  {0}")]
-    UnknownVariable(String, usize, usize),
+    #[error("Unknown variable at {loc}: {msg}")]
+    UnknownVariable { msg: String, loc: ErrorLoc },
 
-    /// An attempt was made to re-assign a variable declared with `let`
-    /// (immutable), or to re-declare it in the same scope.
-    ///
-    /// The fourth field is the line on which the variable was *originally*
-    /// defined, to aid diagnosis.
-    #[error("Redefinition of immutable variable at {1}:{2}: '{0}' was already defined on line {3}")]
-    RedefinitionOfImmutableVariable(String, usize, usize, usize),
+    #[error(
+        "Redefinition of immutable variable at {loc}: '{msg}' was already defined on line {orig_line}"
+    )]
+    RedefinitionOfImmutableVariable {
+        msg: String,
+        loc: ErrorLoc,
+        orig_line: usize,
+    },
 }
 
 impl JitError {
-    /// Return the `(line, column)` source location where this error occurred.
-    ///
-    /// Lines and columns are 1-based.  Returns `(0, 0)` for errors that do
-    /// not have a meaningful location.
     pub fn location(&self) -> (usize, usize) {
-        match self {
-            JitError::Lexing(_, line, col) => (*line, *col),
-            JitError::Parsing(_, line, col) => (*line, *col),
-            JitError::Runtime(_, line, col) => (*line, *col),
-            JitError::UnknownVariable(_, line, col) => (*line, *col),
-            JitError::RedefinitionOfImmutableVariable(_, line, col, _) => (*line, *col),
+        let loc = match self {
+            JitError::Lexing { loc, .. } => loc,
+            JitError::Parsing { loc, .. } => loc,
+            JitError::Runtime { loc, .. } => loc,
+            JitError::UnknownVariable { loc, .. } => loc,
+            JitError::RedefinitionOfImmutableVariable { loc, .. } => loc,
+        };
+        (loc.line, loc.col)
+    }
+
+    pub fn runtime(msg: impl Into<String>, line: usize, col: usize) -> Self {
+        Self::Runtime {
+            msg: msg.into(),
+            loc: ErrorLoc::new(line, col),
+        }
+    }
+
+    pub fn parsing(msg: impl Into<String>, line: usize, col: usize) -> Self {
+        Self::Parsing {
+            msg: msg.into(),
+            loc: ErrorLoc::new(line, col),
+        }
+    }
+
+    pub fn unknown_variable(msg: impl Into<String>, line: usize, col: usize) -> Self {
+        Self::UnknownVariable {
+            msg: msg.into(),
+            loc: ErrorLoc::new(line, col),
         }
     }
 }

@@ -106,7 +106,10 @@ impl<'source> Parser<'source> {
                     }
                 }
                 Err(e) => {
-                    return Err(JitError::Lexing(e, line, span.start - line_start + 1));
+                    return Err(JitError::Lexing {
+                        err: e,
+                        loc: crate::error::ErrorLoc::new(line, span.start - line_start + 1),
+                    });
                 }
             }
             last_span_end = span.end;
@@ -121,8 +124,8 @@ impl<'source> Parser<'source> {
             Ok(td.token)
         } else {
             let loc = self.loc();
-            Err(JitError::Parsing(
-                "Unexpected EOF".into(),
+            Err(JitError::parsing(
+                "Unexpected EOF".to_string(),
                 loc.line as usize,
                 loc.col as usize,
             ))
@@ -200,7 +203,7 @@ impl<'source> Parser<'source> {
         if t == expected {
             Ok(())
         } else {
-            Err(JitError::Parsing(
+            Err(JitError::parsing(
                 format!("Expected {:?}, found {:?}", expected, t),
                 loc.line as usize,
                 loc.col as usize,
@@ -325,7 +328,7 @@ impl<'source> Parser<'source> {
                     Ok(r)
                 }
             }
-            _ => Err(JitError::Parsing(
+            _ => Err(JitError::parsing(
                 format!("Expected expression, found {:?}", token),
                 loc.line as usize,
                 loc.col as usize,
@@ -354,7 +357,7 @@ impl<'source> Parser<'source> {
                     let id = match self.advance()? {
                         Token::Identifier(id) => id,
                         t => {
-                            return Err(JitError::Parsing(
+                            return Err(JitError::parsing(
                                 format!("Expected property name after '.', found {:?}", t),
                                 self.loc().line as usize,
                                 self.loc().col as usize,
@@ -471,7 +474,7 @@ impl<'source> Parser<'source> {
                 let name = match self.advance()? {
                     Token::Identifier(id) => id,
                     t => {
-                        return Err(JitError::Parsing(
+                        return Err(JitError::parsing(
                             format!("Expected field name, found {:?}", t),
                             self.loc().line as usize,
                             self.loc().col as usize,
@@ -559,7 +562,7 @@ impl<'source> Parser<'source> {
                 }
                 Token::RBrace => return None,
                 _ => {
-                    return Some(Err(JitError::Parsing(
+                    return Some(Err(JitError::parsing(
                         format!("Unexpected token {:?}", token),
                         self.loc().line as usize,
                         self.loc().col as usize,
@@ -662,7 +665,7 @@ impl<'source> Parser<'source> {
     ) -> Result<(), JitError> {
         let loc = self.loc();
         let info = self.get_var(id).ok_or_else(|| {
-            JitError::UnknownVariable(id.into(), loc.line as usize, loc.col as usize)
+            JitError::unknown_variable(id.to_string(), loc.line as usize, loc.col as usize)
         })?;
 
         let mut accessors = Vec::new();
@@ -680,7 +683,7 @@ impl<'source> Parser<'source> {
                             accessors.push(Accessor::Field(self.intern(field)))
                         }
                         t => {
-                            return Err(JitError::Parsing(
+                            return Err(JitError::parsing(
                                 format!("Expected field name after '.', found {:?}", t),
                                 self.loc().line as usize,
                                 self.loc().col as usize,
@@ -749,12 +752,14 @@ impl<'source> Parser<'source> {
         let src = self.parse_expr(instructions)?;
         if accessors.is_empty() {
             if !info.is_mut {
-                return Err(JitError::RedefinitionOfImmutableVariable(
-                    id.into(),
-                    self.loc().line as usize,
-                    0,
-                    info.first_line,
-                ));
+                return Err(JitError::RedefinitionOfImmutableVariable {
+                    msg: id.to_string(),
+                    loc: crate::error::ErrorLoc::new(
+                        self.loc().line as usize,
+                        self.loc().col as usize,
+                    ),
+                    orig_line: info.first_line,
+                });
             }
             if info.is_global {
                 instructions.push(Instruction::StoreGlobal {
@@ -811,7 +816,7 @@ impl<'source> Parser<'source> {
         let id = match self.advance()? {
             Token::Identifier(id) => id,
             t => {
-                return Err(JitError::Parsing(
+                return Err(JitError::parsing(
                     format!("Expected identifier, found {:?}", t),
                     self.loc().line as usize,
                     self.loc().col as usize,
@@ -905,7 +910,7 @@ impl<'source> Parser<'source> {
         let id = match self.advance()? {
             Token::Identifier(id) => id,
             t => {
-                return Err(JitError::Parsing(
+                return Err(JitError::parsing(
                     format!("Expected identifier, found {:?}", t),
                     self.loc().line as usize,
                     self.loc().col as usize,
@@ -982,7 +987,7 @@ impl<'source> Parser<'source> {
         let name = match self.advance()? {
             Token::Identifier(id) => id,
             t => {
-                return Err(JitError::Parsing(
+                return Err(JitError::parsing(
                     format!("Expected function name, found {:?}", t),
                     self.loc().line as usize,
                     self.loc().col as usize,
@@ -996,7 +1001,7 @@ impl<'source> Parser<'source> {
                 match self.advance()? {
                     Token::Identifier(id) => params.push(id),
                     t => {
-                        return Err(JitError::Parsing(
+                        return Err(JitError::parsing(
                             format!("Expected parameter name, found {:?}", t),
                             self.loc().line as usize,
                             self.loc().col as usize,
@@ -1258,6 +1263,6 @@ mod tests {
         let parser = Parser::new(input);
         let result = parser.compile();
         assert!(result.is_err());
-        // Should be JitError::UnknownVariable
+        // Should be JitError::unknown_variable
     }
 }
