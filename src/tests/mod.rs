@@ -1,4 +1,4 @@
-//! Unit and integration tests for the `small_interpreter` project.
+//! Unit and integration tests for the `yatsuscript` project.
 //!
 //! This module re-exports the test suites from the submodules:
 //!

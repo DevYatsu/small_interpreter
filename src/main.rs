@@ -1,6 +1,6 @@
-//! # small_interpreter
+//! # yatsuscript
 //!
-//! A fast bytecode interpreter for the **Pi** scripting language.
+//! A fast bytecode interpreter for the **YatsuScript** language.
 
 mod backends;
 mod cli;

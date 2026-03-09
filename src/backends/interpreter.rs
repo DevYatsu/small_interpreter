@@ -167,7 +167,7 @@ async fn drain_join_set(join_set: &mut JoinSet<Result<(), JitError>>) -> Result<
 // Instruction dispatch
 // ---------------------------------------------------------------------------
 
-/// The principal execution loop of the Pi virtual machine.
+/// The principal execution loop of the YatsuScript virtual machine.
 ///
 /// This VM is register-based, meaning instructions operate on a fixed-size
 /// array of `registers` (each an `AtomicU64` containing a NaN-boxed `Value`).

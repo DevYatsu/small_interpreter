@@ -1,8 +1,8 @@
 [package]
-name        = "small_interpreter"
+name        = "yatsuscript"
 version     = "0.1.0"
 edition     = "2024"
-description = "A fast bytecode interpreter for the Pi scripting language, featuring NaN-boxing, a generational GC, and async concurrency via Tokio."
+description = "A fast bytecode interpreter for the YatsuScript language, featuring NaN-boxing, a generational GC, and async concurrency via Tokio."
 repository  = "https://github.com/DevYatsu/small_interpreter"
 license     = "MIT"
 keywords    = ["interpreter", "scripting", "bytecode", "async", "tokio"]

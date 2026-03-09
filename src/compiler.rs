@@ -1,4 +1,4 @@
-//! Definitions for the Pi bytecode compile-time structures.
+//! Definitions for the YatsuScript bytecode compile-time structures.
 //!
 //! This module defines the [`Value`] type (a NaN-boxed 64-bit word that
 //! represents all runtime values), the [`Instruction`] set for the register-based

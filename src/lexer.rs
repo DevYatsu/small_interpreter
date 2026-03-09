@@ -1,4 +1,4 @@
-//! Lexical analysis for the Pi scripting language.
+//! Lexical analysis for the YatsuScript language.
 //!
 //! This module is built on top of the [`logos`] crate, which generates a
 //! highly optimised DFA-based scanner from the token definitions below.
@@ -8,7 +8,7 @@
 //!
 //! # Character set
 //!
-//! Pi source files are expected to be valid ASCII.  Non-ASCII characters
+//! YatsuScript source files are expected to be valid ASCII.  Non-ASCII characters
 //! (e.g. Unicode letters) produce a [`LexingError::NonAsciiCharacter`] error.
 //!
 //! # Comments
@@ -34,7 +34,7 @@ pub enum LexingError {
     InvalidInteger,
     /// A floating-point literal could not be parsed (e.g. overflow).
     InvalidFloat,
-    /// A character that is not part of the Pi character set was encountered.
+    /// A character that is not part of the YatsuScript character set was encountered.
     /// The offending `char` is captured for use in diagnostics.
     NonAsciiCharacter(char),
     /// A catch-all for any other lexer error (should be rare in practice).
@@ -54,7 +54,7 @@ impl LexingError {
     }
 }
 
-/// Every terminal symbol in the Pi grammar.
+/// Every terminal symbol in the YatsuScript grammar.
 ///
 /// The lifetime `'source` is tied to the original source string, allowing
 /// string/identifier tokens to borrow their slices without copying.
