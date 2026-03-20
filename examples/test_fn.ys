@@ -1,22 +1,18 @@
-fn add(a, b) {
-    return a + b
+fn add ( a, b) {
+  return a + b
 }
-
-let res: add(10, 20)
-print("10 + 20 =", res)
-
-fn fib(n) {
-    if n < 2 {
-        return n
-    }
-    return fib(n - 1) + fib(n - 2)
+let res : add ( 10, 20)
+print ( "10 + 20 =", res)
+fn fib ( n) {
+  if n < 2 {
+    return n
+  }
+  return fib ( n - 1) + fib ( n - 2)
 }
-
-print("fib(10) =", fib(10))
-
-print("1 == 1 is", 1 == 1)
-print("1 == 2 is", 1 == 2)
-print("1 != 2 is", 1 != 2)
-print("5 > 3 is", 5 > 3)
-print("5 >= 5 is", 5 >= 5)
-print("2 <= 1 is", 2 <= 1)
+print ( "fib(10) =", fib ( 10))
+print ( "1 == 1 is", 1 == 1)
+print ( "1 == 2 is", 1 == 2)
+print ( "1 != 2 is", 1 != 2)
+print ( "5 > 3 is", 5 > 3)
+print ( "5 >= 5 is", 5 >= 5)
+print ( "2 <= 1 is", 2 <= 1)

@@ -1,26 +1,23 @@
-let a: "Hello, "
-let b: "World!"
-let c: a + b
-print(c)
-
-let s1: "Small"
-let s2: "JIT"
-let s3: s1 + " " + s2
-print(s3)
-
+let a : "Hello, "
+let b : "World!"
+let c : a + b
+print ( c)
+let s1 : "Small"
+let s2 : "JIT"
+let s3 : s1 + " " + s2
+print ( s3)
 if s3 == "Small JIT" {
-    print("SUCCESS")
-} else {
-    print("FAILURE")
+  print ( "SUCCESS")
 }
-
-// Global concat
-mut g1: "Base"
-fn append_to_g(suffix) {
-    g1: g1 + suffix
+else {
+  print ( "FAILURE")
 }
-append_to_g("ment")
-print(g1)
+mut g1 : "Base"
+fn append_to_g ( suffix) {
+  g1 : g1 + suffix
+}
+append_to_g ( "ment")
+print ( g1)
 if g1 == "Basement" {
-    print("GLOBAL SUCCESS")
+  print ( "GLOBAL SUCCESS")
 }

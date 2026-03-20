@@ -1,21 +1,21 @@
-fn check(id) {
-    mut x: 0
-    mut i: 0
-    while i < 1000 {
-        x: x + 1
-        i: i + 1
-    }
-    if x != 1000 {
-        print("FAIL Task", id, ": x is", x)
-    } else {
-        print("OK Task", id)
-    }
+fn check ( id) {
+  mut x : 0
+  mut i : 0
+  while i < 1000 {
+    x : x + 1
+    i : i + 1
+  }
+  if x != 1000 {
+    print ( "FAIL Task", id, ": x is", x)
+  }
+  else {
+    print ( "OK Task", id)
+  }
 }
-
-mut t: 0
+mut t : 0
 while t < 10 {
-    spawn {
-        check(t)
-    }
-    t: t + 1
+  spawn {
+    check ( t)
+  }
+  t : t + 1
 }

@@ -1,34 +1,25 @@
-fn fib(n) {
-    if n < 2 {
-        return n
-    }
-    return fib(n - 1) + fib(n - 2)
+fn fib ( n) {
+  if n < 2 {
+    return n
+  }
+  return fib ( n - 1) + fib ( n - 2)
 }
-
-fn heavy_work(iterations) {
-    mut i: 0
-    mut acc: 0
-    while i < iterations {
-        // High-density math
-        acc: acc + 1
-
-        // Frequent small allocations
-        let l:[i, acc, i + acc]
-
-        i: i + 1
-    }
-
-    // Recursion performance
-    fib(20)
+fn heavy_work ( iterations) {
+  mut i : 0
+  mut acc : 0
+  while i < iterations {
+    acc : acc + 1
+    let l : [ i, acc, i + acc]
+    i : i + 1
+  }
+  fib ( 20)
 }
-
-let num_tasks: 16
-let iterations: 100000
-
-mut t: 0
+let num_tasks : 16
+let iterations : 100000
+mut t : 0
 while t < num_tasks {
-    spawn {
-        heavy_work(iterations)
-    }
-    t: t + 1
+  spawn {
+    heavy_work ( iterations)
+  }
+  t : t + 1
 }

@@ -1,10 +1,9 @@
-fn handle(req) {
-    let start: time()
-    print("--- Request Start ---")
-    print(req)
-    print("--- Request End ---")
-    return("Hello from Small JIT! Took " + str((time() - start) * 1000) + " ms")
+fn handle ( req) {
+  let start : time ()
+  print ( "--- Request Start ---")
+  print ( req)
+  print ( "--- Request End ---")
+  return ( "Hello from Small JIT! Took " + str ( ( time () - start) * 1000) + " ms")
 }
-
-print("Small JIT Web Server starting on port 9000...")
-serve(9000, handle)
+print ( "Small JIT Web Server starting on port 9000...")
+serve ( 9000, handle)

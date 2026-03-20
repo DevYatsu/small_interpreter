@@ -1,24 +1,19 @@
-fn stress(n) {
-    mut i: 0
-    while i < n {
-        // Create lots of small short-lived objects
-        let list:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        let nested:[list, list, list]
-        let s: "a temporary string that might be SSO"
-        let long_s: "a much longer string that will definitely be allocated on the heap by the interpreter"
-
-        i: i + 1
-        print i
-    }
+fn stress ( n) {
+  mut i : 0
+  while i < n {
+    let list : [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    let nested : [ list, list, list]
+    let s : "a temporary string that might be SSO"
+    let long_s : "a much longer string that will definitely be allocated on the heap by the interpreter"
+    i : i + 1
+    print i
+  }
 }
-
-let num_tasks: 16
-let count: 10_000
-
-print("Spawning", num_tasks, "tasks, each doing", count, "allocations...")
-
-mut t: 0
+let num_tasks : 16
+let count : 10000
+print ( "Spawning", num_tasks, "tasks, each doing", count, "allocations...")
+mut t : 0
 while t < num_tasks {
-    stress(count)
-    t: t + 1
+  stress ( count)
+  t : t + 1
 }

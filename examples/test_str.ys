@@ -1,6 +1,6 @@
-print("Testing str() function:")
-print("Number: " + str(42))
-print("Bool: " + str(true))
-let l:[1, "hello",[3, 4]]
-print("List: " + str(l))
-print("String: " + str("already a string"))
+print ( "Testing str() function:")
+print ( "Number: " + str ( 42))
+print ( "Bool: " + str ( true))
+let l : [ 1, "hello", [ 3, 4]]
+print ( "List: " + str ( l))
+print ( "String: " + str ( "already a string"))

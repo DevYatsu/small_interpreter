@@ -1,15 +1,11 @@
-fn handle(req) {
-    return "Handled: " + req
+fn handle ( req) {
+  return "Handled: " + req
 }
-
-fn logger(msg, callback) {
-    print("Log: " + msg)
-    print("Callback says: " + callback("test data"))
+fn logger ( msg, callback) {
+  print ( "Log: " + msg)
+  print ( "Callback says: " + callback ( "test data"))
 }
-
-print("Testing direct function name reference:")
-logger("Hello", handle)
-
-print("\nTesting with native function:")
-logger("Native", str)
-
+print ( "Testing direct function name reference:")
+logger ( "Hello", handle)
+print ( "\nTesting with native function:")
+logger ( "Native", str)
