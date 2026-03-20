@@ -3,7 +3,7 @@ members = [
     "ys-core",
     "ys-runtime",
     "ys-cli",
-    "yatsuscript-lsp",
+    "ys-lsp",
 ]
 resolver = "2"
 
