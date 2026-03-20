@@ -1,0 +1,80 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "YatsuScript",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#punctuations" },
+    { "include": "#constants" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.yatsuscript", "begin": "//", "end": "$" },
+        { "name": "comment.block.yatsuscript", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.yatsuscript",
+          "match": "\\b(if|else|while|for|in|return|spawn|continue)\\b"
+        },
+        {
+          "name": "keyword.declaration.yatsuscript",
+          "match": "\\b(let|mut|fn)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.yatsuscript",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "name": "constant.character.escape.yatsuscript", "match": "\\\\." }]
+        },
+        {
+          "name": "string.quoted.template.yatsuscript",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+             { "name": "constant.character.escape.yatsuscript", "match": "\\\\." },
+             { "name": "variable.interpolation.yatsuscript", "begin": "\\${", "end": "}", "patterns": [{ "include": "$self" }] }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.yatsuscript", "match": "\\b[0-9]+(\\.[0-9]+)?\\b" }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.boolean.yatsuscript", "match": "\\b(true|false)\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.arithmetic.yatsuscript", "match": "(\\+|\\-|\\*|/)" },
+        { "name": "keyword.operator.comparison.yatsuscript", "match": "(==|!=|<=|>=|<|>)" },
+        { "name": "keyword.operator.logical.yatsuscript", "match": "(!)" },
+        { "name": "keyword.operator.range.yatsuscript", "match": "(\\.\\.)" }
+      ]
+    },
+    "punctuations": {
+      "patterns": [
+        { "name": "punctuation.separator.yatsuscript", "match": "(:|,)" },
+        { "name": "punctuation.bracket.round.yatsuscript", "match": "(\\(|\\))" },
+        { "name": "punctuation.bracket.curly.yatsuscript", "match": "(\\{|\\})" },
+        { "name": "punctuation.bracket.square.yatsuscript", "match": "(\\[|\\])" },
+        { "name": "punctuation.accessor.yatsuscript", "match": "(\\.)" }
+      ]
+    }
+  },
+  "scopeName": "source.yatsuscript"
+}

@@ -30,6 +30,10 @@ enum Commands {
     Fmt {
         path: PathBuf,
     },
+    /// Syntax-check YatsuScript files.
+    Check {
+        path: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -59,6 +63,9 @@ async fn main() {
         }
         (Some(Commands::Fmt { path }), _, _) => {
             fmt::format_all(&path)
+        }
+        (Some(Commands::Check { path }), _, _) => {
+            run::check_file(&path).await
         }
         (None, Some(code), _) => {
             match run::run_source(&code).await {

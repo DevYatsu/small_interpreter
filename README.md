@@ -43,27 +43,27 @@ yatsuscript
 ## Language Features
 
 ### Variable Declarations
-```pi
+```yatsuscript
 let x: 10      // Immutable
 mut y: 20      // Mutable
 y: x + y       // Assignment
 ```
 
 ### Concurrency
-```pi
+```yatsuscript
 spawn {
     print("Running in parallel!")
 }
 ```
 
 ### Collections
-```pi
+```yatsuscript
 let list: [1, 2, 3]
 let user: { name: "Yanis", age: 30 }
 ```
 
 ### Functional Style
-```pi
+```yatsuscript
 let r: (0..10).step(2)
 for i in r {
     print(i)

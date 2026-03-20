@@ -1,0 +1,51 @@
+{
+  "name": "yatsuscript",
+  "displayName": "YatsuScript support for VS Code",
+  "description": "Powerful editor support for YatsuScript language using the built-in LSP.",
+  "version": "0.1.0",
+  "publisher": "Yanis",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "yatsuscript",
+        "aliases": ["YatsuScript", "yatsuscript"],
+        "extensions": [".ys"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "yatsuscript",
+        "scopeName": "source.yatsuscript",
+        "path": "./syntaxes/yatsuscript.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "YatsuScript",
+      "properties": {
+        "yatsuscript.serverPath": {
+          "type": "string",
+          "default": "yatsuscript-lsp",
+          "description": "Absolute path to the yatsuscript-lsp binary or command name if in PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "echo 'No compilation needed for basic JS client'"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.0.2"
+  }
+}

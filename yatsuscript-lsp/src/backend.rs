@@ -14,7 +14,7 @@ use crate::builtin_docs;
 /// Core Language Server backend, holding state across clients.
 pub struct YatsuBackend {
     pub client:    Client,
-    pub documents: DashMap<Url, Arc<AnalysisResults>>,
+    pub documents: DashMap<Url, (Arc<AnalysisResults>, String)>,
 }
 
 impl YatsuBackend {
@@ -28,13 +28,33 @@ impl YatsuBackend {
 
     async fn update_document(&self, uri: Url, source: String) {
         let results = Arc::new(analyze_source(&source));
-        self.documents.insert(uri.clone(), results.clone());
+        self.documents.insert(uri.clone(), (results.clone(), source));
 
         self.client.publish_diagnostics(uri, results.diagnostics.clone(), None).await;
     }
 
-    fn get_word_at_pos(&self, _uri: &Url, _pos: Position) -> Option<String> {
-        None
+    fn get_word_at_pos(&self, uri: &Url, pos: Position) -> Option<String> {
+        let entry  = self.documents.get(uri)?;
+        let source = &entry.1;
+        let lines: Vec<&str> = source.lines().collect();
+        let line   = lines.get(pos.line as usize)?;
+        
+        let chars: Vec<char> = line.chars().collect();
+        let col    = pos.character as usize;
+        if col >= chars.len() { return None; }
+
+        let mut start = col;
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+
+        let mut end = col;
+        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+
+        if start == end { return None; }
+        Some(chars[start..end].iter().collect())
     }
 }
 
@@ -106,7 +126,7 @@ impl LanguageServer for YatsuBackend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri   = params.text_document_position_params.text_document.uri;
         let pos   = params.text_document_position_params.position;
-        let results = match self.documents.get(&uri) {
+        let (results, _) = match self.documents.get(&uri) {
             Some(r) => r.value().clone(),
             None    => return Ok(None),
         };
@@ -123,7 +143,7 @@ impl LanguageServer for YatsuBackend {
         let decl = results.declarations.iter().find(|d| {
             d.range.start.line <= pos.line 
                 && d.range.end.line >= pos.line 
-                && d.range.start.character <= pos.character 
+                && (d.range.start.line < pos.line || d.range.start.character <= pos.character)
                 && (d.range.end.line > pos.line || d.range.end.character >= pos.character)
         });
 
@@ -165,7 +185,7 @@ impl LanguageServer for YatsuBackend {
             None    => return Ok(None),
         };
 
-        let results = match self.documents.get(&uri) {
+        let (results, _) = match self.documents.get(&uri) {
             Some(r) => r.value().clone(),
             None    => return Ok(None),
         };
@@ -181,7 +201,7 @@ impl LanguageServer for YatsuBackend {
 
     async fn document_symbol(&self, params: DocumentSymbolParams) -> Result<Option<DocumentSymbolResponse>> {
         let uri     = params.text_document.uri;
-        let results = match self.documents.get(&uri) {
+        let (results, _) = match self.documents.get(&uri) {
             Some(r) => r.value().clone(),
             None    => return Ok(None),
         };
@@ -203,7 +223,7 @@ impl LanguageServer for YatsuBackend {
 
     async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri;
-        let results = match self.documents.get(&uri) {
+        let (results, _) = match self.documents.get(&uri) {
             Some(r) => r.value().clone(),
             None    => return Ok(None),
         };
